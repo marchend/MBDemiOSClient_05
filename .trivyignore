@@ -1,0 +1,17 @@
+# .trivyignore — vulnerabilities deferred for triage
+#
+# Add a line per CVE ID to suppress that finding from the Trivy SCA scan
+# (security-fast.yml job: trivy-fs). Lines starting with # are comments.
+# Empty lines are ignored.
+#
+# Format examples:
+#   CVE-2024-12345                     # suppress everywhere
+#   CVE-2024-12345 exp:2026-12-31      # suppress until expiry, then re-fail
+#
+# When suppressing a CVE, leave a one-line note explaining *why* — typically:
+#   - Vendor patch not yet released and the affected codepath is unreachable.
+#   - False positive: dependency is dev-only / test-only.
+#   - Vendor disputed: link to the vendor advisory rejecting the CVE.
+#
+# Each entry needs an owner and an expiry. Without those, suppressed CVEs
+# decay into invisibility and the security posture quietly weakens.
