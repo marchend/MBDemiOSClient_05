@@ -1,0 +1,79 @@
+name: Contract conformance
+
+# Re-runs the cross-tier codegen and diffs it against the committed Generated/
+# tree (scripts/contract-gate.py) so contract drift — including a human / non-
+# agent edit to a generated DTO, or a tampered committed spec — is caught on the
+# PR. This is the consumer repo's OWN CI enforcing what the in-process pre-PR
+# gate enforces in the agent.
+#
+# REQUIRED (Phase 4): this job is a REQUIRED status check on develop (added by
+# the hardener's apply_branch_protection, but ONLY for codegen-backed repos that
+# emit this workflow — a non-codegen repo never gets the required check, so it
+# can never perma-block). The job ALWAYS runs (no skip ``if:`` below) and reports
+# SUCCESS when there's no drift / nothing to check, so a required-but-emitted
+# check always reaches a terminal state. The in-process pre-PR gate stays the
+# first line of defence (see the hardener's _CONTRACT_CHECK_NAME).
+#
+# Trigger policy mirrors ios-build.yml / ci.yml: PRs into the feature target
+# (develop) and pushes to develop.
+
+on:
+  pull_request:
+    branches: ['develop']
+  push:
+    branches: ['develop']
+  workflow_dispatch:
+
+concurrency:
+  group: contract-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  contract-conformance:
+    # STABLE check name (must stay byte-identical to the hardener's
+    # _CONTRACT_CHECK_NAME so promotion to a required check is a one-line
+    # change). ALWAYS runs (no skip ``if:``) so it can never be a not-success
+    # required check later.
+    name: contract conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        # Temurin 21 matches the JDK the MothershipCode backend image bakes —
+        # generator output is JVM/version-sensitive, so the gate must run the
+        # same toolchain the producer used.
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Python 3
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Fetch + verify pinned openapi-generator
+        # The consumer runner has no baked JAR (unlike the backend image), so we
+        # fetch the PINNED version from Maven Central and verify its sha1 before
+        # use — a compromised mirror/CDN can't swap the generator that decides
+        # every diff verdict. Version + sha1 are rendered from the
+        # contract_codegen constants (single source of truth with the image).
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/openapi-generator"
+          JAR="$RUNNER_TEMP/openapi-generator/openapi-generator-cli.jar"
+          curl -sSfL \
+            "https://repo1.maven.org/maven2/org/openapitools/openapi-generator-cli/7.7.0/openapi-generator-cli-7.7.0.jar" \
+            -o "$JAR"
+          echo "41f26774ba0dbed788613a9c3062ddc6b9fcfdad  $JAR" | sha1sum -c -
+          echo "OPENAPI_GENERATOR_JAR=$JAR" >> "$GITHUB_ENV"
+
+      - name: Run contract conformance gate
+        # SKIP-not-block when the generator/spec is unavailable; exit 1 only on
+        # real drift (see scripts/contract-gate.py).
+        run: python3 scripts/contract-gate.py

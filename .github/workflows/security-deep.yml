@@ -1,0 +1,151 @@
+name: Security — Deep
+
+# Deep tier: pushes to uat and main, promotion PRs targeting uat or main,
+# weekly cron (pinned to main), manual dispatch, or any PR labelled
+# security:full. Includes DAST + Dependency-Check + OWASP rule packs +
+# full-history secret scan.
+
+on:
+  push:
+    branches: ['uat', 'main']
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    - cron: '0 2 * * 1' # Mondays 02:00 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: security-deep-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  security-events: write
+  issues: write
+  # ``gitleaks/gitleaks-action@v2`` calls
+  # ``GET /repos/:owner/:repo/pulls/:n/commits`` to scope its scan to
+  # the PR's diff. Without ``pull-requests: read`` the action 403s
+  # before it ever runs gitleaks — looks like a finding but is actually
+  # a permissions failure.
+  pull-requests: read
+
+jobs:
+  gate:
+    name: Gate (label / branch / schedule)
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - id: decide
+        # Stage the untrusted GitHub context values into env vars BEFORE
+        # the shell sees them. ``github.event.label.name`` in particular
+        # is user-controlled (a maintainer can set any label name) and
+        # interpolating it directly into ``run:`` is a shell-injection
+        # vector flagged by Semgrep's
+        # ``yaml.github-actions.security.run-shell-injection`` rule.
+        # The shell only ever reads from ``"$ENVVAR"``, never from a
+        # GitHub expression.
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          GITHUB_LABEL_NAME: ${{ github.event.label.name }}
+        run: |
+          # Decide whether to run the deep tier:
+          #   - PR targeting uat or main: always run (promotion gate)
+          #   - PR with the security:full label: run regardless of base
+          #   - push / schedule / manual: always run
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            if [[ "$GITHUB_BASE_REF" == "uat" || "$GITHUB_BASE_REF" == "main" ]]; then
+              echo "run=true" >> "$GITHUB_OUTPUT"
+            elif [[ "$GITHUB_LABEL_NAME" == "security:full" ]]; then
+              echo "run=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "run=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # On schedule (weekly cron), pin checkout to `main` so the audit reflects
+  # production code regardless of which branch is currently default. For all
+  # other triggers, fall back to github.ref (the branch that triggered the run).
+  semgrep-deep:
+    name: Semgrep (OWASP Top Ten + CWE Top 25)
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref }}
+      # See ``security-fast.yml.j2`` for the rationale on excluding the
+      # SQLAlchemy batch-import perf rule.
+      - run: semgrep ci --config=p/owasp-top-ten --config=p/cwe-top-25 --config=p/security-audit --exclude-rule python.sqlalchemy.performance.performance-improvements.batch-import
+
+  gitleaks-history:
+    name: Gitleaks (full history)
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref }}
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-check:
+    name: OWASP Dependency-Check
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref }}
+      - uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: 'MB_E2E_Demo_05'
+          path: '.'
+          format: 'SARIF'
+          # ``--suppression`` points at ``.dependency-check-suppressions.xml``
+          # (project root) which catalogs any deferred HIGH/CRITICAL
+          # transitive-dep findings with a tracking link. Create the file
+          # the first time dep-check fails on a transitive advisory you
+          # can't fix immediately; never use it for findings introduced
+          # by the current PR.
+          args: '--failOnCVSS 7 --enableRetired --suppression .dependency-check-suppressions.xml'
+      # SARIF upload to GitHub Code Scanning intentionally omitted —
+      # ``github/codeql-action/upload-sarif`` requires GitHub Advanced
+      # Security on private repos and fails with "Code scanning is not
+      # enabled for this repository" otherwise. The SARIF report still
+      # ships as a job artefact for manual review; re-add the upload
+      # step once GHAS is enabled.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dependency-check-sarif
+          path: reports/dependency-check-report.sarif
+          if-no-files-found: ignore
+
+  open-issue-on-failure:
+    name: Open issue on new findings
+    needs: [semgrep-deep, gitleaks-history, dependency-check]
+    if: failure() && (github.event_name == 'schedule' || github.event_name == 'push')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Security deep scan failed — run ${context.runId}`,
+              body: `One or more deep scan jobs failed.\n\nRun: ${runUrl}\nBranch: ${context.ref}\nEvent: ${context.eventName}`,
+              labels: ['security', 'P1'],
+            });

@@ -1,0 +1,80 @@
+name: Security — Fast
+
+# Fast tier: develop → qa promotion PRs + pushes to qa.
+# develop itself runs ONLY ci.yml (no security checks); the fast tier
+# kicks in at the qa boundary so security never gates feature iteration.
+# Target wall time ≤ 5 min. No DAST. Path-filtered + cancel-in-progress.
+
+on:
+  pull_request:
+    branches: ['qa']
+  push:
+    branches: ['qa']
+
+concurrency:
+  group: security-fast-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: read
+
+jobs:
+
+  gitleaks:
+    name: Gitleaks (secrets, diff scope)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  semgrep:
+    name: Semgrep (default + security-audit)
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/.semgrep
+          key: semgrep-rules-${{ runner.os }}
+      # Excludes a noisy SQLAlchemy performance rule that fires on
+      # intentional test-fixture loops (``for x in [...]: session.add()``).
+      # It's a perf recommendation, not a security finding — silencing
+      # it keeps the security signal clean. Remove if you want the
+      # perf advice surfaced in your project.
+      - run: semgrep ci --config=auto --config=p/security-audit --exclude-rule python.sqlalchemy.performance.performance-improvements.batch-import
+        env:
+          SEMGREP_RULES_CACHE_DIR: ~/.semgrep
+
+  trivy-fs:
+    name: Trivy (SCA filesystem, HIGH+CRITICAL)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}
+      # Emits a human-readable table to the job log AND fails the job on
+      # any HIGH/CRITICAL vuln with a fix available. .trivyignore at the
+      # repo root suppresses pre-existing findings deferred for triage.
+      # SARIF upload is intentionally omitted — github/codeql-action/upload-sarif
+      # requires GitHub Advanced Security on private repos, which we don't
+      # have on Pro. Re-add a SARIF artifact + Code Scanning upload once
+      # GHAS is enabled or the repo goes public.
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          exit-code: '1'
+          ignore-unfixed: true
+          trivyignores: .trivyignore
+          format: table

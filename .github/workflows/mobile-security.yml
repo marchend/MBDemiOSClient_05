@@ -1,0 +1,173 @@
+name: Security — Mobile (MobSF)
+
+# Mobile static analysis tier: source-mode MobSF scan against the iOS / Android
+# source tree. Same trigger policy as security-deep.yml (push to uat or
+# main, promotion PR to uat or main, weekly cron, manual
+# dispatch, or any PR labelled security:full).
+#
+# v1 uses MobSF source-mode (zipped source archive) rather than IPA/APK
+# scanning so the workflow runs without Apple Developer signing or Android
+# release keystores. Switch to compiled-binary mode once signing is wired up.
+
+on:
+  push:
+    branches: ['uat', 'main']
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    - cron: '0 2 * * 1' # Mondays 02:00 UTC, aligned with security-deep.yml
+  workflow_dispatch:
+
+concurrency:
+  group: security-mobile-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  security-events: write
+  issues: write
+
+jobs:
+  gate:
+    name: Gate (label / branch / schedule)
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - id: decide
+        # Same pattern as ``security-deep.yml.j2``: stage the untrusted
+        # GitHub context values into env vars BEFORE the shell sees
+        # them. ``github.event.label.name`` is user-controlled and
+        # interpolating it directly into ``run:`` is the shell-injection
+        # vector flagged by Semgrep's
+        # ``yaml.github-actions.security.run-shell-injection`` rule.
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          GITHUB_LABEL_NAME: ${{ github.event.label.name }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            if [[ "$GITHUB_BASE_REF" == "uat" || "$GITHUB_BASE_REF" == "main" ]]; then
+              echo "run=true" >> "$GITHUB_OUTPUT"
+            elif [[ "$GITHUB_LABEL_NAME" == "security:full" ]]; then
+              echo "run=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "run=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  mobsf-scan:
+    name: MobSF static (source mode, score ≥ 60)
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    services:
+      mobsf:
+        image: opensecurity/mobile-security-framework-mobsf:latest
+        ports:
+          - 8000:8000
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref }}
+
+      - name: Wait for MobSF
+        run: |
+          # MobSF takes ~30s to come up; poll until /api/v1/scans returns 401
+          # (auth required) which means the API is live.
+          for i in $(seq 1 60); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/v1/scans || true)
+            if [[ "$code" == "401" || "$code" == "200" ]]; then
+              echo "MobSF up after ${i}s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "MobSF did not become ready" >&2
+          exit 1
+
+      - name: Zip iOS source for MobSF
+        run: |
+          # Source-mode MobSF accepts a .zip of the project tree. We zip
+          # the iOS source dir(s) excluding build artefacts.
+          set -euxo pipefail
+          ( cd "AcmeBank" && zip -r "${GITHUB_WORKSPACE}/AcmeBank-source.zip" . \
+            -x "DerivedData/*" "*/Pods/*" "*/.build/*" "*.xcuserdata/*" )
+
+      - name: Upload to MobSF and scan
+        env:
+          # The default MobSF API key is rotated on container start and printed
+          # to the container's stdout. In CI we pin a known key via the
+          # MOBSF_API_KEY env so the scan is reproducible — set a workflow
+          # secret with the same name and pass it to the service container if
+          # you've customised the key. For source-mode + the default image,
+          # the empty key is sufficient.
+          MOBSF_API_KEY: ${{ secrets.MOBSF_API_KEY }}
+        run: |
+          set -euo pipefail
+          AUTH_HEADER=()
+          if [[ -n "${MOBSF_API_KEY:-}" ]]; then
+            AUTH_HEADER=(-H "Authorization: ${MOBSF_API_KEY}")
+          fi
+
+          # Score threshold (0-100). Per architecture/07-cicd-security-pipeline.md
+          # mobile tier policy: fail when MobSF score < 60.
+          THRESHOLD=60
+
+          # Iterate over every produced zip and run an independent scan.
+          # mobsf-scan.json captures the per-file report so the failure
+          # message in the job log lists the offending zip.
+          shopt -s nullglob
+          fail=0
+          for zip in *-source.zip; do
+            echo "Uploading $zip to MobSF..."
+            UPLOAD=$(curl -fsS "${AUTH_HEADER[@]}" \
+              -F "file=@${zip}" \
+              http://localhost:8000/api/v1/upload)
+            HASH=$(echo "$UPLOAD" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hash"])')
+
+            echo "Scanning hash=$HASH"
+            curl -fsS "${AUTH_HEADER[@]}" \
+              -F "hash=$HASH" \
+              http://localhost:8000/api/v1/scan > /dev/null
+
+            REPORT=$(curl -fsS "${AUTH_HEADER[@]}" \
+              -F "hash=$HASH" \
+              http://localhost:8000/api/v1/report_json)
+            echo "$REPORT" > "${zip%.zip}-mobsf-report.json"
+
+            SCORE=$(echo "$REPORT" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("appsec",{}).get("security_score",d.get("security_score",0)))')
+            echo "$zip → MobSF security_score=$SCORE (threshold ${THRESHOLD})"
+            if [[ "$SCORE" -lt "$THRESHOLD" ]]; then
+              fail=1
+            fi
+          done
+
+          exit $fail
+
+      - name: Upload MobSF reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobsf-reports
+          path: '*-mobsf-report.json'
+
+  open-issue-on-failure:
+    name: Open issue on new findings
+    needs: mobsf-scan
+    if: failure() && (github.event_name == 'schedule' || github.event_name == 'push')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Mobile security scan failed — run ${context.runId}`,
+              body: `MobSF score below threshold or scan errored.\n\nRun: ${runUrl}\nBranch: ${context.ref}\nEvent: ${context.eventName}`,
+              labels: ['security', 'mobile', 'P1'],
+            });
