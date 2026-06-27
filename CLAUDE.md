@@ -38,18 +38,50 @@ xcodebuild test -scheme AcmeBank \
 ```
 Or `Cmd+U` in Xcode on the `AcmeBank` scheme.
 
+## Okta configuration
+
+The app reads four Okta values at runtime from its `Info.plist`. The
+source `AcmeBank/Info.plist` ships sentinel placeholders
+(`__OKTA_<KEY>_UNSET__`); the `scripts/inject_okta_config.sh`
+postBuildScript replaces them with values from the build process's
+environment. Missing env vars are NOT a build error — the sentinels
+survive, and `OktaConfig.load()` returns `.notConfigured(reason:)` at
+runtime so the app still launches.
+
+| Env var             | Example                                          |
+|---------------------|--------------------------------------------------|
+| `OKTA_ISSUER`       | `https://example.okta.com/oauth2/default`        |
+| `OKTA_CLIENT_ID`    | `0oa1abc2DEF3ghi4JKL5`                           |
+| `OKTA_REDIRECT_URI` | `com.acmebank.mobile://callback`                 |
+| `OKTA_SCOPES`       | `openid profile offline_access` (space-separated)|
+
+Three ways to set them:
+
+1. **Shell export** before `xed .` — works when Xcode inherits the
+   shell environment.
+2. **Xcode scheme environment variables** (Edit Scheme → Run / Test →
+   Arguments → Environment Variables) — survives Finder-launched Xcode.
+3. **CI secrets** exported into the job env before `xcodebuild`.
+
+**`xcodebuild` subshell caveat:** `xcodebuild` does NOT inherit the
+calling job's env by default. Either pass values inline as build
+settings (`xcrun xcodebuild ... OKTA_ISSUER="$OKTA_ISSUER" ...`) or set
+them as scheme environment variables.
+
 ## Key Directory Structure
 ```
 AcmeBank/
   App/              ← @main entry + root view (ContentView placeholder → RootView)
-  Core/             ← Auth, Networking, Notifications, Extensions  [deferred]
+  Core/             ← Auth (OktaConfig in this PR), Networking, Notifications, Extensions
   Domain/           ← Models + Repository protocols                [deferred]
   Data/             ← Remote + Mock repository implementations     [deferred]
   Features/         ← Login, Home, Accounts, Transfer, Cards       [deferred]
   DesignSystem/     ← Colors, Typography, Assets.xcassets          [deferred]
   Resources/        ← Asset catalog, entitlements, privacy manifest
-AcmeBankTests/      ← XCTest unit tests (one bootstrap smoke test today)
+  Info.plist        ← Hand-rolled; OKTA_* keys ship as sentinels
+AcmeBankTests/      ← XCTest unit tests (bootstrap + OktaConfigTests)
 AcmeBankUITests/    ← XCUITest end-to-end tests (one launch smoke test today)
+scripts/            ← Build-phase scripts (inject_okta_config.sh)
 project.yml         ← XcodeGen spec — source of truth for .xcodeproj
 setup.sh            ← Post-clone materialisation script
 ```
@@ -73,8 +105,12 @@ AppCoordinator
         └── MoreCoordinator
 ```
 
-### Authentication — Okta OIDC (deferred — future PR)
-- `AuthService` implements `AuthServiceProtocol` (signIn / signOut / refreshTokenIfNeeded).
+### Authentication — Okta OIDC (in progress)
+- `OktaConfig` (this PR) loads `OKTA_ISSUER`, `OKTA_CLIENT_ID`,
+  `OKTA_REDIRECT_URI`, `OKTA_SCOPES` from `Info.plist`. Total function:
+  returns `.notConfigured(reason:)` on any failure — never traps.
+- `AuthService` will implement `AuthServiceProtocol` (signIn / signOut /
+  refreshTokenIfNeeded) on top of `OktaDirectAuth` — future PR.
 - Tokens persisted to Keychain via `KeychainStore`.
 - **Keychain note:** All `SecItem*` calls MUST include `kSecUseDataProtectionKeychain: true`
   for CI simulator compatibility (avoids `-34018 errSecMissingEntitlement` without a
@@ -110,7 +146,7 @@ AppCoordinator
 - Target ≥ 80% line coverage on `Core/` and `Features/`.
 
 ## Deferred Work (not in this PR)
-- Okta OIDC authentication (AuthService, KeychainStore, UserSession, Okta.plist)
+- Okta OIDC `AuthService` + `KeychainStore` + `UserSession` (config loader lands this PR)
 - MVVM + Coordinator pattern (AppCoordinator, LoginCoordinator, TabBarCoordinator, etc.)
 - Networking layer (APIClient, APIRouter, APIError, RequestInterceptor)
 - Domain models (Account, Transaction, Customer, TransferRequest)
