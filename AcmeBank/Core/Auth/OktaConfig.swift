@@ -48,13 +48,24 @@ public enum OktaConfig: Equatable {
         if !isPresent(redirectRaw) { missing.append(Key.redirectURI) }
         if !isPresent(scopesRaw) { missing.append(Key.scopes) }
 
-        guard missing.isEmpty,
-              let issuerStr = issuerRaw,
+        // Failure mode 1: one or more keys are absent / sentinel / empty.
+        // Reported separately so the diagnostic always names the bad keys.
+        guard missing.isEmpty else {
+            return .notConfigured(reason: "Okta not configured: missing \(missing.joined(separator: ", "))")
+        }
+
+        // Failure mode 2: all `isPresent` checks passed, so each `…Raw` value
+        // is guaranteed non-nil by construction. This `guard` exists only to
+        // launder the optionals without force-unwrapping; if it ever fires it
+        // means `isPresent` and `stringValue` have drifted out of sync, and
+        // the diagnostic should say so explicitly rather than printing the
+        // empty `missing` list.
+        guard let issuerStr = issuerRaw,
               let clientId = clientIdRaw,
               let redirectStr = redirectRaw,
               let scopesStr = scopesRaw
         else {
-            return .notConfigured(reason: "Okta not configured: missing \(missing.joined(separator: ", "))")
+            return .notConfigured(reason: "Okta not configured: internal invariant violated (isPresent passed but value was nil)")
         }
 
         guard let issuerURL = parseURL(issuerStr) else {

@@ -33,6 +33,25 @@ final class LoginViewModelTests: XCTestCase {
                       "isSignInEnabled must be true when both fields contain text")
     }
 
+    func test_isSignInEnabled_falseWhileSigningIn() {
+        let vm = LoginViewModel()
+        vm.username = "user@acmebank.com"
+        vm.password = "secret"
+        vm.isSigningIn = true
+        XCTAssertFalse(vm.isSignInEnabled,
+                       "isSignInEnabled must be false while a sign-in is in flight, even with valid fields")
+    }
+
+    func test_isSignInEnabled_trueAfterSigningInClears() {
+        let vm = LoginViewModel()
+        vm.username = "user@acmebank.com"
+        vm.password = "secret"
+        vm.isSigningIn = true
+        vm.isSigningIn = false
+        XCTAssertTrue(vm.isSignInEnabled,
+                      "isSignInEnabled must return to true once isSigningIn clears")
+    }
+
     // MARK: - signIn
 
     func test_signIn_callsOnSignInWithCorrectArguments() {
@@ -84,6 +103,21 @@ final class LoginViewModelTests: XCTestCase {
                        "onSignIn must not be called when password is empty")
     }
 
+    func test_signIn_doesNotCallOnSignInWhileAlreadySigningIn() {
+        let vm = LoginViewModel()
+        vm.username = "alice@acmebank.com"
+        vm.password = "p@ssw0rd"
+        vm.isSigningIn = true
+
+        var callCount = 0
+        vm.onSignIn = { _, _, _ in callCount += 1 }
+
+        vm.signIn()
+
+        XCTAssertEqual(callCount, 0,
+                       "onSignIn must not re-fire while a sign-in is already in flight (rapid double-tap guard)")
+    }
+
     // MARK: - Initial State
 
     func test_errorMessage_isNilOnInit() {
@@ -108,6 +142,12 @@ final class LoginViewModelTests: XCTestCase {
         let vm = LoginViewModel()
         XCTAssertFalse(vm.keepSignedIn,
                        "keepSignedIn must be false on initialisation")
+    }
+
+    func test_isSigningIn_isFalseOnInit() {
+        let vm = LoginViewModel()
+        XCTAssertFalse(vm.isSigningIn,
+                       "isSigningIn must be false on initialisation")
     }
 
     // MARK: - isPasswordVisible
