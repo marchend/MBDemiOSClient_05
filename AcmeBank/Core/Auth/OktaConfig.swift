@@ -27,6 +27,18 @@ public enum OktaConfig: Equatable {
         public static let scopes = "OKTA_SCOPES"
     }
 
+    /// `true` iff this is the `.configured` case. Used by callers that
+    /// only need a yes/no answer (e.g. `AcmeBankApp` deciding whether to
+    /// pre-seed the Login error banner, or `LandingUITests` gating its
+    /// end-to-end test on the presence of real Okta credentials).
+    ///
+    /// Prefer pattern-matching on the case when you also need the
+    /// underlying values; this convenience exists for the binary check.
+    public var isConfigured: Bool {
+        if case .configured = self { return true }
+        return false
+    }
+
     /// Read configuration from `bundle`'s Info.plist. Defaults to `.main`
     /// in production; tests inject a fixture via the lower-level
     /// `resolve(lookup:)` entry point.
