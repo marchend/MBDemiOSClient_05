@@ -59,4 +59,18 @@ final class LoginViewModel: ObservableObject {
         guard isSignInEnabled else { return }
         onSignIn(username, password, keepSignedIn)
     }
+
+    /// Clears any visible auth-error banner.
+    ///
+    /// `LoginView` calls this from `.onChange(of: username)` and
+    /// `.onChange(of: password)` so the moment the user starts correcting
+    /// their input, the stale "Incorrect username or password" banner
+    /// disappears — per MBE2EDEM05-9 AC #7. Idempotent and cheap to call
+    /// on every keystroke; if `errorMessage` is already `nil` this is a
+    /// no-op and SwiftUI will skip the redraw.
+    func clearErrorOnEdit() {
+        if errorMessage != nil {
+            errorMessage = nil
+        }
+    }
 }
