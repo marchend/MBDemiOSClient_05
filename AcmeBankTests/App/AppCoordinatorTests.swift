@@ -107,6 +107,7 @@ final class AppCoordinatorTests: XCTestCase {
     /// carried session (e.g. a re-auth that yields fresh claims).
     func test_didSignIn_whileLanding_replacesSession() {
         let auth = FakeAuthServicing()
+        auth.persistedSession = true
         let first = makeSession(name: "Alice", email: "alice@acmebank.com")
         let coordinator = AppCoordinator(authService: auth, cachedSession: { first })
         XCTAssertEqual(coordinator.route, .landing(first))
@@ -123,6 +124,7 @@ final class AppCoordinatorTests: XCTestCase {
     /// `didSignOut` from Landing transitions back to Login.
     func test_didSignOut_fromLanding_transitionsToLogin() {
         let auth = FakeAuthServicing()
+        auth.persistedSession = true
         let coordinator = AppCoordinator(authService: auth, cachedSession: { self.makeSession() })
         XCTAssertNotEqual(coordinator.route, .login)
 
