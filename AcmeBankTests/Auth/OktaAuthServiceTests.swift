@@ -65,7 +65,15 @@ final class OktaAuthServiceTests: XCTestCase {
         var setFailureForAnyKey: Error?
         var getFailureForAnyKey: Error?
         var deleteFailureForAnyKey: Error?
+        /// Optional queue of per-call delete errors. If non-empty, each
+        /// `delete(_:)` consumes the head and throws it (skipping any
+        /// `nil` entries). Lets a test script "first delete throws,
+        /// subsequent ones succeed" — exercises the `signOut` exhaustive
+        /// iteration rule.
+        var deleteFailureQueue: [Error?] = []
         private(set) var setCallCount = 0
+        private(set) var deleteCallCount = 0
+        private(set) var deletedKeysInOrder: [KeychainStore.KeychainKey] = []
 
         func set(_ value: String, for key: KeychainStore.KeychainKey) throws {
             setCallCount += 1
@@ -77,6 +85,12 @@ final class OktaAuthServiceTests: XCTestCase {
             return storage[key]
         }
         func delete(_ key: KeychainStore.KeychainKey) throws {
+            deleteCallCount += 1
+            deletedKeysInOrder.append(key)
+            if !deleteFailureQueue.isEmpty {
+                let next = deleteFailureQueue.removeFirst()
+                if let error = next { throw error }
+            }
             if let error = deleteFailureForAnyKey { throw error }
             storage.removeValue(forKey: key)
         }
@@ -262,6 +276,50 @@ final class OktaAuthServiceTests: XCTestCase {
         }
     }
 
+    /// Guard against the previous over-broad `.contains("network")`
+    /// arm in `mapSDKError`: a server-side policy rejection whose
+    /// description merely contains the substring "network" (e.g. an
+    /// Okta "network policy violation" message) must NOT collapse to
+    /// `.network` and surface "Couldn't reach Okta — check your
+    /// connection". It should fall through to `.invalidServerResponse`
+    /// so the UI can show the real server message.
+    func test_signIn_policyErrorMentioningNetwork_doesNotMapToNetwork() async {
+        struct PolicyError: Error, CustomStringConvertible {
+            var description: String { "Server policy rejected sign-in: network policy violation" }
+        }
+        let flow = FakeDirectAuthFlow(.error(PolicyError()))
+        let service = makeService(flow: flow)
+
+        do {
+            _ = try await service.signIn(username: "u", password: "p", keepSignedIn: false)
+            XCTFail("expected throw")
+        } catch let error as AuthError {
+            switch error {
+            case .network:
+                XCTFail("`network` policy text MUST NOT be mapped to AuthError.network")
+            case .invalidServerResponse:
+                /* expected */ break
+            default:
+                XCTFail("expected .invalidServerResponse, got \(error)")
+            }
+        } catch {
+            XCTFail("expected AuthError, got \(error)")
+        }
+    }
+
+    /// Conversely, a wrapped `URLError` whose description surfaces an
+    /// `NSURLErrorDomain` code (the shape the SDK actually uses when
+    /// it re-wraps connection failures) still maps to `.network`.
+    func test_signIn_nsurlErrorDescription_mapsToNetwork() async {
+        struct WrappedURLError: Error, CustomStringConvertible {
+            var description: String { "SDKError.wrapped(NSURLErrorDomain Code=-1009)" }
+        }
+        let flow = FakeDirectAuthFlow(.error(WrappedURLError()))
+        let service = makeService(flow: flow)
+
+        await assertSignInThrows(service, equal: .network)
+    }
+
     // MARK: - JWT decode failure on success path
 
     /// SDK reported success, but the returned id-token isn't a valid
@@ -379,6 +437,50 @@ final class OktaAuthServiceTests: XCTestCase {
         let flow = FakeDirectAuthFlow(.mfaRequired)
         let service = makeService(flow: flow, keychain: keychain)
         XCTAssertNoThrow(try service.signOut())
+    }
+
+    /// The first `delete` (for `.idToken`) throws. The remaining two
+    /// MUST still be attempted — otherwise `.accessToken` /
+    /// `.refreshToken` would be left behind and `hasPersistedSession()`
+    /// (which probes `.refreshToken`) would report a live session
+    /// after a "failed" sign-out, letting the caller silently restore
+    /// it. The first error is still rethrown so the UI can decide
+    /// whether to surface a banner.
+    func test_signOut_continuesDeletingRemainingKeys_whenFirstDeleteThrows() throws {
+        struct ForcedDeleteError: Error, Equatable { let message: String }
+        let firstError = ForcedDeleteError(message: "forced first-key failure")
+
+        let keychain = FakeKeychain()
+        try keychain.set("id",  for: .idToken)
+        try keychain.set("acc", for: .accessToken)
+        try keychain.set("ref", for: .refreshToken)
+        // Only the FIRST delete throws; the next two succeed.
+        keychain.deleteFailureQueue = [firstError, nil, nil]
+
+        let flow = FakeDirectAuthFlow(.mfaRequired)
+        let service = makeService(flow: flow, keychain: keychain)
+
+        // The first error is preserved and rethrown after the loop.
+        XCTAssertThrowsError(try service.signOut()) { error in
+            XCTAssertEqual(error as? ForcedDeleteError, firstError,
+                           "signOut should rethrow the FIRST keychain delete error")
+        }
+
+        // All three deletes were attempted, in the documented order.
+        XCTAssertEqual(keychain.deleteCallCount, 3,
+                       "signOut MUST attempt every delete even after one throws")
+        XCTAssertEqual(keychain.deletedKeysInOrder,
+                       [.idToken, .accessToken, .refreshToken])
+
+        // .accessToken and .refreshToken were cleared by the successful
+        // follow-up deletes; only .idToken remains because its delete
+        // threw before reaching the `removeValue` line.
+        XCTAssertEqual(try keychain.get(.idToken), "id",
+                       ".idToken stays because its delete threw")
+        XCTAssertNil(try keychain.get(.accessToken),
+                     ".accessToken MUST be cleared even after the first delete throws")
+        XCTAssertNil(try keychain.get(.refreshToken),
+                     ".refreshToken MUST be cleared even after the first delete throws")
     }
 
     // MARK: - Common assertion helper

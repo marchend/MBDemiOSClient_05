@@ -169,11 +169,29 @@ public final class OktaAuthService: AuthServicing {
     }
 
     public func signOut() throws {
-        // Idempotent: KeychainStore.delete already treats
-        // errSecItemNotFound as success.
-        try keychain.delete(.idToken)
-        try keychain.delete(.accessToken)
-        try keychain.delete(.refreshToken)
+        // Best-effort exhaustive sign-out: attempt EVERY delete even if
+        // an earlier one throws, so a single bad `OSStatus` on
+        // `.idToken` cannot leave `.accessToken` and `.refreshToken`
+        // behind — which would cause `hasPersistedSession()` (which
+        // probes `.refreshToken`) to report a live session after a
+        // "failed" sign-out and let the caller silently restore it.
+        // We still surface the first error to the caller so the UI can
+        // decide whether to retry or surface a banner.
+        //
+        // Note: `KeychainStore.delete` already treats
+        // `errSecItemNotFound` as success, so this loop is idempotent
+        // when no tokens are stored.
+        var firstError: Error?
+        for key in [KeychainStore.KeychainKey.idToken, .accessToken, .refreshToken] {
+            do {
+                try keychain.delete(key)
+            } catch {
+                firstError = firstError ?? error
+            }
+        }
+        if let firstError {
+            throw firstError
+        }
     }
 
     // MARK: - Internals
@@ -209,6 +227,12 @@ public final class OktaAuthService: AuthServicing {
     /// string ("invalid_grant", "mfa_required", …) in their
     /// description, so a substring match is a reasonable fallback that
     /// keeps the call site decoupled from the SDK's exact type names.
+    ///
+    /// TODO(MBE2EDEM05-25 / PR 4): once the composition root lands and
+    /// the real SDK symbol surface is pinned, replace this string-match
+    /// fallback with real `OAuth2Error` / `DirectAuthenticationFlow.Error`
+    /// pattern matching. The narrow heuristics below are intentionally
+    /// conservative — see the `urlerror`/`offline` note.
     static func mapSDKError(_ error: Error) -> AuthError {
         let description = String(describing: error).lowercased()
         if description.contains("invalid_grant") || description.contains("invalidgrant") {
@@ -217,7 +241,21 @@ public final class OktaAuthService: AuthServicing {
         if description.contains("mfa_required") || description.contains("mfarequired") {
             return .mfaRequired
         }
-        if description.contains("urlerror") || description.contains("network") || description.contains("offline") {
+        // Narrow network-ish fallback. `URLError` itself is already
+        // caught and mapped one level up in `signIn`, so this arm only
+        // exists to catch wrapped `URLError`s that the SDK surfaces via
+        // their `NSURLErrorDomain` description (e.g. "nsurlerror …" or
+        // "the internet connection appears to be offline").
+        //
+        // We deliberately do NOT match the bare substring "network"
+        // here: it is far too broad — Okta's own policy/server
+        // descriptions and any future SDK error case mentioning the
+        // word "network" (e.g. "network policy violation") would
+        // silently map to `.network` and surface the misleading
+        // "Couldn't reach Okta — check your connection" copy.
+        if description.contains("nsurlerror")
+            || description.contains("urlerror")
+            || description.contains("offline") {
             return .network
         }
         return .invalidServerResponse(String(describing: error))
