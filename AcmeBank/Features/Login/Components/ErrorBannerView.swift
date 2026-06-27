@@ -1,11 +1,12 @@
 import SwiftUI
 
-/// Inline error banner.
+/// Inline error banner used by the Login screen for auth failures.
 ///
 /// Accepts an optional `String` message:
 /// - When `message` is `nil` the view collapses to zero height so it takes no space.
-/// - When `message` is non-nil it renders a rounded rectangle with a light-grey
-///   background (monochrome — no red or colour accent).
+/// - When `message` is non-nil it renders a rounded rectangle with a light red
+///   tinted background and an `exclamationmark.triangle.fill` warning glyph, per
+///   MBE2EDEM05-9 AC #7 (auth-error banner styling).
 struct ErrorBannerView: View {
 
     let message: String?
@@ -13,8 +14,8 @@ struct ErrorBannerView: View {
     var body: some View {
         if let message {
             HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "exclamationmark.circle")
-                    .foregroundStyle(.primary)
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Color(.systemRed))
 
                 Text(message)
                     .font(.subheadline)
@@ -27,7 +28,7 @@ struct ErrorBannerView: View {
             .padding(.vertical, 10)
             .background(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color(.systemGray5))
+                    .fill(Color(.systemRed).opacity(0.1))
             )
         }
     }

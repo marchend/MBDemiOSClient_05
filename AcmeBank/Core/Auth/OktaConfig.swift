@@ -1,0 +1,117 @@
+import Foundation
+
+/// Result of loading Okta OIDC configuration from the bundle's Info.plist.
+///
+/// The app must be runnable (and CI builds must stay green) even when no
+/// Okta credentials have been injected at build time. So `load` is total:
+/// it never traps, force-unwraps, or throws — every failure mode resolves
+/// to `.notConfigured` with a human-readable `reason` so callers can show
+/// a meaningful message (or skip auth in tests).
+///
+/// Sentinel detection: the source `Info.plist` ships placeholder values of
+/// the form `__OKTA_<KEY>_UNSET__`. The `Scripts/inject_okta_config.sh`
+/// postBuildScript replaces them with real values when the matching env
+/// var is set; otherwise the sentinels survive into the built bundle, and
+/// `load` treats them as "not configured".
+public enum OktaConfig: Equatable {
+    case configured(issuer: URL, clientId: String, redirectURI: URL, scopes: [String])
+    case notConfigured(reason: String)
+
+    /// Info.plist keys consumed by this loader. Exposed for tests + the
+    /// build-time inject script — keep this list and the `inject` calls in
+    /// `Scripts/inject_okta_config.sh` in sync.
+    public enum Key {
+        public static let issuer = "OKTA_ISSUER"
+        public static let clientId = "OKTA_CLIENT_ID"
+        public static let redirectURI = "OKTA_REDIRECT_URI"
+        public static let scopes = "OKTA_SCOPES"
+    }
+
+    /// Read configuration from `bundle`'s Info.plist. Defaults to `.main`
+    /// in production; tests inject a fixture via the lower-level
+    /// `resolve(lookup:)` entry point.
+    public static func load(bundle: Bundle = .main) -> OktaConfig {
+        return resolve { key in bundle.object(forInfoDictionaryKey: key) }
+    }
+
+    /// Pure resolver used by both `load` and unit tests. Takes a lookup
+    /// closure so tests don't need to mutate a real `Bundle`.
+    static func resolve(lookup: (String) -> Any?) -> OktaConfig {
+        let issuerRaw = stringValue(lookup(Key.issuer))
+        let clientIdRaw = stringValue(lookup(Key.clientId))
+        let redirectRaw = stringValue(lookup(Key.redirectURI))
+        let scopesRaw = stringValue(lookup(Key.scopes))
+
+        var missing: [String] = []
+        if !isPresent(issuerRaw) { missing.append(Key.issuer) }
+        if !isPresent(clientIdRaw) { missing.append(Key.clientId) }
+        if !isPresent(redirectRaw) { missing.append(Key.redirectURI) }
+        if !isPresent(scopesRaw) { missing.append(Key.scopes) }
+
+        // Failure mode 1: one or more keys are absent / sentinel / empty.
+        // Reported separately so the diagnostic always names the bad keys.
+        guard missing.isEmpty else {
+            return .notConfigured(reason: "Okta not configured: missing \(missing.joined(separator: ", "))")
+        }
+
+        // Failure mode 2: all `isPresent` checks passed, so each `…Raw` value
+        // is guaranteed non-nil by construction. This `guard` exists only to
+        // launder the optionals without force-unwrapping; if it ever fires it
+        // means `isPresent` and `stringValue` have drifted out of sync, and
+        // the diagnostic should say so explicitly rather than printing the
+        // empty `missing` list.
+        guard let issuerStr = issuerRaw,
+              let clientId = clientIdRaw,
+              let redirectStr = redirectRaw,
+              let scopesStr = scopesRaw
+        else {
+            return .notConfigured(reason: "Okta not configured: internal invariant violated (isPresent passed but value was nil)")
+        }
+
+        guard let issuerURL = parseURL(issuerStr) else {
+            return .notConfigured(reason: "Okta not configured: \(Key.issuer) is not a valid URL (got \"\(issuerStr)\")")
+        }
+        guard let redirectURL = parseURL(redirectStr) else {
+            return .notConfigured(reason: "Okta not configured: \(Key.redirectURI) is not a valid URL (got \"\(redirectStr)\")")
+        }
+
+        let scopes = scopesStr
+            .split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
+        guard !scopes.isEmpty else {
+            return .notConfigured(reason: "Okta not configured: \(Key.scopes) is empty after splitting on whitespace")
+        }
+
+        return .configured(issuer: issuerURL, clientId: clientId, redirectURI: redirectURL, scopes: scopes)
+    }
+
+    // MARK: - Helpers
+
+    private static func stringValue(_ raw: Any?) -> String? {
+        return raw as? String
+    }
+
+    /// A value is "present" iff it is a non-empty string that does NOT match
+    /// the `__OKTA_…_UNSET__` sentinel pattern shipped in the source plist.
+    private static func isPresent(_ value: String?) -> Bool {
+        guard let value = value else { return false }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return false }
+        if trimmed.hasPrefix("__OKTA_") && trimmed.hasSuffix("_UNSET__") { return false }
+        return true
+    }
+
+    /// URL-parse helper: requires both a scheme and a host-or-path component
+    /// so we reject obviously malformed input like `"not a url"` while still
+    /// accepting custom-scheme redirect URIs like `com.acmebank.mobile:/cb`.
+    private static func parseURL(_ raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let url = URL(string: trimmed) else { return nil }
+        guard let scheme = url.scheme, !scheme.isEmpty else { return nil }
+        let hasHost = !(url.host?.isEmpty ?? true)
+        let hasPath = !url.path.isEmpty
+        guard hasHost || hasPath else { return nil }
+        return url
+    }
+}

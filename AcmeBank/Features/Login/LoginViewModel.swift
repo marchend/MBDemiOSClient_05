@@ -19,11 +19,26 @@ final class LoginViewModel: ObservableObject {
     @Published var keepSignedIn: Bool = false
     @Published var errorMessage: String?
 
+    /// `true` while an authentication call is in flight.
+    ///
+    /// `LoginView` observes this to:
+    /// 1. Disable the Sign In button (via `isSignInEnabled`) so a rapid
+    ///    double-tap can't dispatch two concurrent auth requests.
+    /// 2. Show an inline spinner / disable input fields while we wait for
+    ///    the `AuthService` response (wiring lands in MBE2EDEM05-10).
+    ///
+    /// Owned here (not on `AuthService`) so the View can read it as plain
+    /// published state without subscribing to a service publisher.
+    @Published var isSigningIn: Bool = false
+
     // MARK: - Computed State
 
-    /// `true` when both username and password contain at least one character.
+    /// `true` when both username and password contain at least one character
+    /// AND no sign-in is currently in flight. The in-flight check guarantees
+    /// the Sign In button is disabled the instant `signIn()` flips
+    /// `isSigningIn` to `true`, preventing duplicate auth requests.
     var isSignInEnabled: Bool {
-        !username.isEmpty && !password.isEmpty
+        !username.isEmpty && !password.isEmpty && !isSigningIn
     }
 
     // MARK: - Callbacks
@@ -36,7 +51,10 @@ final class LoginViewModel: ObservableObject {
 
     // MARK: - Actions
 
-    /// Validates fields and calls `onSignIn` when both are non-empty.
+    /// Validates fields and calls `onSignIn` when both are non-empty and no
+    /// sign-in is already in flight. `isSigningIn` gates re-entry: a second
+    /// tap that arrives before the caller flips `isSigningIn` back to false
+    /// is dropped on the floor.
     func signIn() {
         guard isSignInEnabled else { return }
         onSignIn(username, password, keepSignedIn)
