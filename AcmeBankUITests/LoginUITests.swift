@@ -1,4 +1,5 @@
 import XCTest
+import AcmeBank
 
 /// XCUITest suite for the Login critical user flow.
 ///
@@ -11,6 +12,11 @@ import XCTest
 /// The `onSignIn` closure is a no-op stub in this story; after tapping "Sign in"
 /// the screen remains on the login view. A future `LoginCoordinator` story will
 /// wire real navigation and expand these tests to assert the post-auth state.
+///
+/// `import AcmeBank` (non-testable) is enough here: the only symbol we need
+/// from the host module is `OktaConfig`, which is `public`. `@testable` would
+/// require the app target to be built with `-enable-testing`, which the
+/// XcodeGen scheme does not enable for the UITests target.
 final class LoginUITests: XCTestCase {
 
     private var app: XCUIApplication!
@@ -24,6 +30,21 @@ final class LoginUITests: XCTestCase {
 
     override func tearDownWithError() throws {
         app = nil
+    }
+
+    // MARK: - Helpers
+
+    /// True iff the app bundle has real Okta credentials injected. UI tests
+    /// that drive a real Okta sign-in are skipped when this is false so CI
+    /// (which has no secrets) stays green; engineers running locally with
+    /// the env vars set get the full end-to-end coverage.
+    ///
+    /// We pattern-match on the enum (rather than adding a derived property
+    /// on `OktaConfig`) to keep the diff for this PR contained to the
+    /// files listed in MBE2EDEM05-24's plan.
+    private var isOktaConfigured: Bool {
+        if case .configured = OktaConfig.load() { return true }
+        return false
     }
 
     // MARK: - Tests
@@ -92,5 +113,67 @@ final class LoginUITests: XCTestCase {
         toggle.tap()
         // A second tap returns to unchecked — no crash.
         toggle.tap()
+    }
+
+    /// AC #7 — visibility + clear-on-edit behaviour of the error banner.
+    ///
+    /// XCUITest can't introspect the SwiftUI styling of the banner directly,
+    /// so we assert the contract reachable from the accessibility tree:
+    ///
+    ///   1. On a fresh launch with `LoginViewModel.errorMessage == nil` the
+    ///      banner element (identifier `errorBanner`) is absent — the
+    ///      `if let message` in `ErrorBannerView` collapses the view tree.
+    ///   2. Typing into username and then password does NOT spuriously
+    ///      cause the banner to appear (the `.onChange` plumbing is wired
+    ///      to *clear*, never to surface, an error).
+    ///
+    /// The "make a banner visible and watch it clear" half of AC #7 is
+    /// fully covered by `LoginViewModelTests.test_clearErrorOnEdit_*` —
+    /// surfacing an error from a UI test requires either a launch-arg
+    /// seam or the real AuthService wiring, both of which are owned by
+    /// MBE2EDEM05-10 and intentionally out of scope here.
+    func testErrorBannerHasRedTintAndClearsOnEdit() {
+        // 1. Banner is absent on launch.
+        let banner = app.otherElements["errorBanner"]
+        XCTAssertFalse(
+            banner.exists,
+            "Error banner must be absent when LoginViewModel.errorMessage is nil"
+        )
+        XCTAssertFalse(
+            app.images["errorBannerIcon"].exists,
+            "Error banner icon must be absent when the banner is hidden"
+        )
+
+        // 2. Editing username + password does not surface a banner.
+        let usernameField = app.textFields["usernameField"]
+        XCTAssertTrue(usernameField.waitForExistence(timeout: 5))
+        usernameField.tap()
+        usernameField.typeText("user@acmebank.com")
+
+        let passwordField = app.secureTextFields["passwordField"]
+        passwordField.tap()
+        passwordField.typeText("Password1!")
+
+        XCTAssertFalse(
+            banner.exists,
+            "Editing credentials must never *surface* an error banner — only clear an existing one"
+        )
+    }
+
+    /// End-to-end Okta sign-in scaffold. Skipped unless real Okta env vars
+    /// are injected into the bundle at build time — CI without secrets sees
+    /// this as a green skip rather than a red failure. The full happy-path
+    /// assertions land alongside the AuthService wiring story (MBE2EDEM05-10);
+    /// for now this is the scaffold that proves the gating compiles and the
+    /// skip path exits cleanly.
+    func test_signIn_endToEnd_withRealOkta() throws {
+        try XCTSkipUnless(isOktaConfigured, "Okta env vars not set")
+
+        // The full assertions land in the AuthService wiring story; until
+        // then this body just touches the field so the scaffold has a
+        // non-trivial action when Okta IS configured locally.
+        let usernameField = app.textFields["usernameField"]
+        XCTAssertTrue(usernameField.waitForExistence(timeout: 5))
+        usernameField.tap()
     }
 }

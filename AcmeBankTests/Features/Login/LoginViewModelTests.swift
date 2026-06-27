@@ -172,4 +172,72 @@ final class LoginViewModelTests: XCTestCase {
         XCTAssertFalse(vm.isPasswordVisible,
                        "isPasswordVisible must return to false after two toggles")
     }
+
+    // MARK: - clearErrorOnEdit (AC #7)
+
+    /// Setting `errorMessage` to a string and calling `clearErrorOnEdit`
+    /// resets it to `nil` — this is what `LoginView` calls from
+    /// `.onChange(of: username)` / `.onChange(of: password)` so a stale
+    /// "Incorrect username or password" banner disappears the moment the
+    /// user starts correcting their input.
+    func test_clearErrorOnEdit_resetsErrorMessageToNil() {
+        let vm = LoginViewModel()
+        vm.errorMessage = "Incorrect username or password. Please try again."
+
+        vm.clearErrorOnEdit()
+
+        XCTAssertNil(vm.errorMessage,
+                     "clearErrorOnEdit must reset errorMessage to nil")
+    }
+
+    /// Calling `clearErrorOnEdit` when no error is shown is a safe no-op.
+    /// `.onChange(of: username)` fires on every keystroke, so this method
+    /// must be cheap and idempotent.
+    func test_clearErrorOnEdit_isNoOpWhenErrorMessageAlreadyNil() {
+        let vm = LoginViewModel()
+        XCTAssertNil(vm.errorMessage)
+
+        vm.clearErrorOnEdit()
+
+        XCTAssertNil(vm.errorMessage,
+                     "clearErrorOnEdit must leave a nil errorMessage as nil")
+    }
+
+    /// Repeated invocations must remain idempotent — verifies the second
+    /// call doesn't somehow re-populate or trip an assertion.
+    func test_clearErrorOnEdit_isIdempotent() {
+        let vm = LoginViewModel()
+        vm.errorMessage = "Some error"
+
+        vm.clearErrorOnEdit()
+        vm.clearErrorOnEdit()
+        vm.clearErrorOnEdit()
+
+        XCTAssertNil(vm.errorMessage,
+                     "Repeated clearErrorOnEdit calls must leave errorMessage nil")
+    }
+
+    /// `clearErrorOnEdit` only touches `errorMessage` — it must not reset
+    /// the user's typed credentials, the password-visibility toggle, or
+    /// the keep-signed-in preference.
+    func test_clearErrorOnEdit_doesNotMutateOtherState() {
+        let vm = LoginViewModel()
+        vm.username = "alice@acmebank.com"
+        vm.password = "p@ssw0rd"
+        vm.keepSignedIn = true
+        vm.isPasswordVisible = true
+        vm.errorMessage = "Incorrect username or password."
+
+        vm.clearErrorOnEdit()
+
+        XCTAssertNil(vm.errorMessage)
+        XCTAssertEqual(vm.username, "alice@acmebank.com",
+                       "username must not be cleared by clearErrorOnEdit")
+        XCTAssertEqual(vm.password, "p@ssw0rd",
+                       "password must not be cleared by clearErrorOnEdit")
+        XCTAssertTrue(vm.keepSignedIn,
+                      "keepSignedIn must not be flipped by clearErrorOnEdit")
+        XCTAssertTrue(vm.isPasswordVisible,
+                      "isPasswordVisible must not be flipped by clearErrorOnEdit")
+    }
 }
