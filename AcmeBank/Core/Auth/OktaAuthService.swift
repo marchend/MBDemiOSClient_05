@@ -273,8 +273,9 @@ public final class OktaAuthService: AuthServicing {
 ///      Authentication is the resource-owner password-credentials
 ///      grant, which has no browser redirect step. The
 ///      okta-mobile-swift 2.x `DirectAuthenticationFlow` initializer is
-///      `(issuerURL:clientId:scopes:)`; there is no `redirectUri:`
-///      parameter.
+///      `(issuerURL:clientId:scope:)` — note the singular `scope:`
+///      label, which takes a single space-separated string of scopes.
+///      There is no `redirectUri:` parameter.
 ///   2. Awaits `flow.start(username, with: .password(password))` to
 ///      perform the resource-owner password-credentials exchange.
 ///   3. Translates the resulting `DirectAuthenticationFlow.Status`:
@@ -306,21 +307,35 @@ private final class RealDirectAuthFlow: OktaAuthService.DirectAuthFlowDriving {
 
     func start(username: String, password: String) async throws -> OktaAuthService.FlowOutcome {
         // okta-mobile-swift 2.x: scopes are passed as a single
-        // space-separated string, NOT as `[String]`. The issuer label
-        // is `issuerURL`. Direct Authentication is the
-        // resource-owner password-credentials grant — there is no
-        // browser redirect, so the initializer takes NO `redirectUri:`
-        // argument. The `redirectURI` we hold onto is retained only so
-        // the production `makeFlow` closure's `.configured` payload
-        // shape (which includes a redirect URI for browser flows) can
-        // be passed through uniformly.
+        // space-separated string under the SINGULAR `scope:` label
+        // (not `scopes:` — that label produces
+        // "incorrect argument label in call (have
+        // 'issuerURL:clientId:scopes:', expected
+        // 'issuerURL:clientId:scope:')"). The issuer label is
+        // `issuerURL`. Direct Authentication is the resource-owner
+        // password-credentials grant — there is no browser redirect,
+        // so the initializer takes NO `redirectUri:` argument. The
+        // `redirectURI` we hold onto is retained only so the
+        // production `makeFlow` closure's `.configured` payload shape
+        // (which includes a redirect URI for browser flows) can be
+        // passed through uniformly.
         let flow = try DirectAuthenticationFlow(
             issuerURL: issuer,
             clientId: clientId,
-            scopes: scopes.joined(separator: " ")
+            scope: scopes.joined(separator: " ")
         )
 
-        let status = try await flow.start(username, with: .password(password))
+        // Fully-qualify the `.password` case to short-circuit any
+        // residual contextual-base ambiguity: Swift needs to resolve
+        // this against `DirectAuthenticationFlow.PrimaryFactor`, and
+        // if the surrounding `try DirectAuthenticationFlow(...)` ever
+        // fails to type-check the compiler reports a misleading
+        // "cannot infer contextual base in reference to member
+        // 'password'" cascade error here instead of the real cause.
+        let status = try await flow.start(
+            username,
+            with: DirectAuthenticationFlow.PrimaryFactor.password(password)
+        )
 
         switch status {
         case .success(let token):
