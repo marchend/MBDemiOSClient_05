@@ -72,14 +72,15 @@ them as scheme environment variables.
 ```
 AcmeBank/
   App/              ← @main entry + root view (ContentView placeholder → RootView)
-  Core/             ← Auth (OktaConfig in this PR), Networking, Notifications, Extensions
+  Core/             ← Auth (OktaConfig, AuthError, UserSession, KeychainStore,
+                      AuthServicing, OktaAuthService), Networking, Notifications
   Domain/           ← Models + Repository protocols                [deferred]
   Data/             ← Remote + Mock repository implementations     [deferred]
   Features/         ← Login, Home, Accounts, Transfer, Cards       [deferred]
   DesignSystem/     ← Colors, Typography, Assets.xcassets          [deferred]
   Resources/        ← Asset catalog, entitlements, privacy manifest
   Info.plist        ← Hand-rolled; OKTA_* keys ship as sentinels
-AcmeBankTests/      ← XCTest unit tests (bootstrap + OktaConfigTests)
+AcmeBankTests/      ← XCTest unit tests
 AcmeBankUITests/    ← XCUITest end-to-end tests (one launch smoke test today)
 scripts/            ← Build-phase scripts (inject_okta_config.sh)
 project.yml         ← XcodeGen spec — source of truth for .xcodeproj
@@ -106,20 +107,37 @@ AppCoordinator
 ```
 
 ### Authentication — Okta OIDC (in progress)
-- `OktaConfig` (this PR) loads `OKTA_ISSUER`, `OKTA_CLIENT_ID`,
-  `OKTA_REDIRECT_URI`, `OKTA_SCOPES` from `Info.plist`. Total function:
-  returns `.notConfigured(reason:)` on any failure — never traps.
-- `AuthService` will implement `AuthServiceProtocol` (signIn / signOut /
-  refreshTokenIfNeeded) on top of `OktaDirectAuth` — future PR.
-- Tokens persisted to Keychain via `KeychainStore`.
-- **Keychain note:** All `SecItem*` calls MUST include `kSecUseDataProtectionKeychain: true`
-  for CI simulator compatibility (avoids `-34018 errSecMissingEntitlement` without a
-  provisioning profile). The entitlements stub in `AcmeBank/AcmeBank.entitlements`
+- `OktaConfig` loads `OKTA_ISSUER`, `OKTA_CLIENT_ID`, `OKTA_REDIRECT_URI`,
+  `OKTA_SCOPES` from `Info.plist`. Total function: returns
+  `.notConfigured(reason:)` on any failure — never traps.
+- `AuthServicing` protocol (`signIn` / `hasPersistedSession` / `signOut`);
+  `OktaAuthService` is the production conformer. The Okta SDK call is
+  quarantined behind an internal `DirectAuthFlowDriving` seam — the
+  concrete `DirectAuthenticationFlow` wiring lands in the composition-root
+  PR. Until then `RealDirectAuthFlow.start` throws
+  `AuthError.notConfigured("Okta SDK driver wiring lands in PR 4")` so
+  the contract is exercisable but no UI is yet wired in.
+- `AuthError` is the ONLY error type that escapes `signIn`. Post-SDK-
+  success failures (JWT decode → `.invalidServerResponse`; Keychain
+  write → swallowed + logged) MUST be mapped or swallowed so the
+  Login UI's `catch let e as AuthError` arm never falls through to a
+  misleading network-error banner.
+- Tokens persisted to Keychain via `KeychainStore` (`KeychainStoring`
+  protocol for testability). Writes on the `signIn` success path are
+  best-effort: a failure is logged but never rethrown — the session is
+  still returned. Failing a write turns a one-launch cache miss into
+  a sign-in failure, which is wrong.
+- **Keychain note:** All `SecItem*` calls — both in `KeychainStore`
+  and in any ad-hoc test query — MUST include
+  `kSecUseDataProtectionKeychain: true` for CI simulator compatibility
+  (avoids `-34018 errSecMissingEntitlement` without a provisioning
+  profile). The entitlements stub in `AcmeBank/AcmeBank.entitlements`
   covers signed-device builds; the flag covers the simulator/CI path.
 - `RequestInterceptor` refreshes token before every API request; on failure posts
   `AppNotification.sessionExpired`.
 - `UserSession` (value type) carries `userId`, `displayName`, `email`, `accessToken`,
-  `authTimestamp`, `deviceName`. Never store in `UserDefaults`; inject it.
+  `authTimestamp`, `deviceName`. Built by `UserSession.make(idTokenJWT:...)`
+  via base64URL-decode of the JWT payload. Never store in `UserDefaults`; inject it.
 
 ### Networking (deferred — future PR)
 - `APIClient` wraps `URLSession`; decodes via `.convertFromSnakeCase` + `.iso8601`.
@@ -146,7 +164,8 @@ AppCoordinator
 - Target ≥ 80% line coverage on `Core/` and `Features/`.
 
 ## Deferred Work (not in this PR)
-- Okta OIDC `AuthService` + `KeychainStore` + `UserSession` (config loader lands this PR)
+- Okta SDK driver wiring (real `DirectAuthenticationFlow.start` call replacing the stub)
+- Composition root that injects `OktaAuthService` into the Login flow
 - MVVM + Coordinator pattern (AppCoordinator, LoginCoordinator, TabBarCoordinator, etc.)
 - Networking layer (APIClient, APIRouter, APIError, RequestInterceptor)
 - Domain models (Account, Transaction, Customer, TransferRequest)
@@ -156,7 +175,6 @@ AppCoordinator
 - Internal Notifications (AppNotification, NotificationPublisher, NotificationKey)
 - Core/Extensions (Decimal+Currency, Date+Greeting, String+Initials)
 - SwiftLint config (`.swiftlint.yml`)
-- CI workflow (`ios-build.yml` — GitHub Actions xcodebuild + SwiftLint)
 - xcconfig files for API_BASE_URL injection
 - Home Dashboard BFF integration (`GET /v1/home`, HomeDashboard payload)
 
