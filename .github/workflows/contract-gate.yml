@@ -63,11 +63,22 @@ jobs:
         # use — a compromised mirror/CDN can't swap the generator that decides
         # every diff verdict. Version + sha1 are rendered from the
         # contract_codegen constants (single source of truth with the image).
+        #
+        # --retry / --retry-all-errors: Maven Central + GitHub Actions network
+        # egress are occasionally flaky (transient 4xx/5xx, TLS resets). Without
+        # retries a single blip fails the entire required check on an unrelated
+        # PR. The sha1 verification below is the real integrity guarantee, so
+        # retrying the download is safe.
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/openapi-generator"
           JAR="$RUNNER_TEMP/openapi-generator/openapi-generator-cli.jar"
           curl -sSfL \
+            --retry 5 \
+            --retry-delay 5 \
+            --retry-all-errors \
+            --connect-timeout 30 \
+            --max-time 300 \
             "https://repo1.maven.org/maven2/org/openapitools/openapi-generator-cli/7.7.0/openapi-generator-cli-7.7.0.jar" \
             -o "$JAR"
           echo "41f26774ba0dbed788613a9c3062ddc6b9fcfdad  $JAR" | sha1sum -c -
