@@ -1,10 +1,4 @@
 import Foundation
-// Import is intentional even though no SDK symbols are referenced in
-// this PR: it forces SwiftPM to resolve the `OktaDirectAuth` product
-// added in `project.yml` so PR 4 (composition wiring) can land the
-// concrete `DirectAuthenticationFlow.start(_:with:)` call without a
-// separate dependency-graph change. See the long doc comment on
-// `RealDirectAuthFlow` below for why we don't reference SDK symbols yet.
 import OktaDirectAuth
 
 /// Production `AuthServicing` driven by Okta's `DirectAuthenticationFlow`.
@@ -228,11 +222,11 @@ public final class OktaAuthService: AuthServicing {
     /// description, so a substring match is a reasonable fallback that
     /// keeps the call site decoupled from the SDK's exact type names.
     ///
-    /// TODO(MBE2EDEM05-25 / PR 4): once the composition root lands and
-    /// the real SDK symbol surface is pinned, replace this string-match
-    /// fallback with real `OAuth2Error` / `DirectAuthenticationFlow.Error`
-    /// pattern matching. The narrow heuristics below are intentionally
-    /// conservative — see the `urlerror`/`offline` note.
+    /// The narrow heuristics below are intentionally conservative — see
+    /// the `urlerror`/`offline` note. Finer-grained `OAuth2Error` /
+    /// `DirectAuthenticationFlow.Error` pattern-matching can be layered
+    /// on as a follow-up if the SDK ever exposes stable typed cases for
+    /// the failure modes we care about.
     static func mapSDKError(_ error: Error) -> AuthError {
         let description = String(describing: error).lowercased()
         if description.contains("invalid_grant") || description.contains("invalidgrant") {
@@ -262,46 +256,84 @@ public final class OktaAuthService: AuthServicing {
     }
 }
 
-// MARK: - Real SDK driver (composition pending — PR 4)
+// MARK: - Real SDK driver
 
-/// Production `DirectAuthFlowDriving` that will wrap Okta's
-/// `DirectAuthenticationFlow` once the composition root lands in PR 4
-/// (MBE2EDEM05-25). Today this is intentionally a stub.
+/// Production `DirectAuthFlowDriving` that wraps Okta's
+/// `DirectAuthenticationFlow` from `okta-mobile-swift` 2.x.
 ///
-/// WHY THE STUB: this PR's scope is the *typed contract* — `AuthError`,
-/// `UserSession`, `KeychainStore`, `AuthServicing` and the `signIn`
-/// orchestration / error-mapping flow. The plan explicitly forbids
-/// referencing any of these types from the UI in this PR ("composition
-/// wiring is PR 4"), so no production caller exercises this driver yet.
-/// The fake driver in `OktaAuthServiceTests` covers every code path in
-/// `signIn`.
+/// This is the ONLY type in the module that imports or references
+/// `OktaDirectAuth` symbols — every other call site operates on the
+/// neutral `FlowOutcome` enum so unit tests can script every code path
+/// without pulling the SDK's network stack into the test target.
 ///
-/// The okta-mobile-swift 2.x API surface for `DirectAuthenticationFlow`
-/// (exact initializer label set, exact `Status` cases, exact `Token`
-/// property names) shifted between the 1.x and 2.x branches, and
-/// `Package.resolved` is not committed yet on this branch — so the
-/// safe move is to defer the SDK symbol lookups to PR 4 where the
-/// composition root and a working build with a resolved package graph
-/// will validate them in the same PR. Stubbing here lets this PR ship a
-/// compiling, fully-tested typed contract; PR 4 replaces the stub body
-/// with the real `flow.start(...)` call.
+/// Concretely, `start(username:password:)`:
+///   1. Constructs a `DirectAuthenticationFlow` from the config captured
+///      at init time (issuer URL, client id, redirect URI, scopes).
+///   2. Awaits `flow.start(username, with: .password(password))` to
+///      perform the resource-owner password-credentials exchange.
+///   3. Translates the resulting `DirectAuthenticationFlow.Status`:
+///        - `.success(token)` → `.success(idToken:accessToken:refreshToken:)`
+///          by reading `token.idToken?.rawValue`, `token.accessToken`,
+///          and `token.refreshToken`.
+///        - any other status (MFA challenge, secondary factor required,
+///          continuation, …) → `.mfaRequired`. The caller surfaces this
+///          as `AuthError.mfaRequired` so the user is told to complete
+///          sign-in on the web.
 ///
-/// At runtime today this driver throws `.notConfigured("…")`, which the
-/// caller turns into a typed `AuthError` — the UI would receive a
-/// clean, actionable message even if it WERE wired up (it isn't),
-/// never a crash and never a misleading network error.
+/// Initializer / SDK errors escape as-is and are mapped to `AuthError`
+/// by `OktaAuthService.signIn`'s catch ladder (`URLError` →
+/// `.network`; string-match `invalid_grant` → `.invalidCredentials`;
+/// otherwise → `.invalidServerResponse`).
 private final class RealDirectAuthFlow: OktaAuthService.DirectAuthFlowDriving {
 
+    private let issuer: URL
+    private let clientId: String
+    private let redirectURI: URL
+    private let scopes: [String]
+
     init(issuer: URL, clientId: String, redirectURI: URL, scopes: [String]) {
-        // No-op: stored config is unused until PR 4 lands the real
-        // SDK call. Listed in the signature so the production
-        // initializer's `makeFlow` closure already passes everything
-        // the SDK will need.
-        _ = (issuer, clientId, redirectURI, scopes)
+        self.issuer = issuer
+        self.clientId = clientId
+        self.redirectURI = redirectURI
+        self.scopes = scopes
     }
 
     func start(username: String, password: String) async throws -> OktaAuthService.FlowOutcome {
-        _ = (username, password)
-        throw AuthError.notConfigured("Okta SDK driver wiring lands in PR 4 (MBE2EDEM05-25)")
+        // okta-mobile-swift 2.x: scopes are passed as a single
+        // space-separated string, NOT as `[String]`. The redirect URI
+        // label is `redirectUri` (lowercase `i`), and the issuer label
+        // is `issuerURL`.
+        let flow = try DirectAuthenticationFlow(
+            issuerURL: issuer,
+            clientId: clientId,
+            scopes: scopes.joined(separator: " "),
+            redirectUri: redirectURI
+        )
+
+        let status = try await flow.start(username, with: .password(password))
+
+        switch status {
+        case .success(let token):
+            // `Token.idToken` is an optional `JWT` whose `.rawValue` is
+            // the raw compact-serialization string we need to feed into
+            // `UserSession.make`. If the IdP omitted the id_token (no
+            // `openid` scope, or a misconfigured app), surface an empty
+            // string and let the JWT decoder turn it into
+            // `AuthError.invalidServerResponse` upstream — that's a
+            // more honest signal than a fake success.
+            return .success(
+                idToken: token.idToken?.rawValue ?? "",
+                accessToken: token.accessToken,
+                refreshToken: token.refreshToken
+            )
+
+        default:
+            // Any non-success status (MFA challenge, secondary factor
+            // continuation, …) is collapsed to `.mfaRequired` so the
+            // caller can surface the "extra verification required"
+            // copy. A future PR can break these out into distinct
+            // `FlowOutcome` cases if we ever support in-app MFA.
+            return .mfaRequired
+        }
     }
 }

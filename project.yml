@@ -13,10 +13,9 @@ targets:
     platform: iOS
     sources: [AcmeBank]
     dependencies:
-      # TODO: used by AuthService (next PR — MBE2EDEM05-10).
-      # Wired in now as intentional scaffolding so the package graph is
-      # already resolved when the AuthService PR lands; no Swift code in
-      # this PR imports OktaDirectAuth yet.
+      # Consumed by `RealDirectAuthFlow` in
+      # `AcmeBank/Core/Auth/OktaAuthService.swift` — the production
+      # adapter that drives the OIDC password-grant sign-in flow.
       - package: OktaMobileSwift
         product: OktaDirectAuth
     settings:
