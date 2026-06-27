@@ -35,7 +35,7 @@ struct LoginView: View {
                         .padding(.top, 4)
                         .padding(.bottom, 32)
 
-                    // ── Username field ─────────────────────────────────
+                    // ── Username field ─────────────────────────────────────
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Username")
                             .font(.subheadline)
@@ -51,10 +51,11 @@ struct LoginView: View {
                                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                                     .stroke(Color(.systemGray4), lineWidth: 1)
                             )
+                            .accessibilityIdentifier("usernameField")
                     }
                     .padding(.bottom, 16)
 
-                    // ── Password field ─────────────────────────────────
+                    // ── Password field ─────────────────────────────────────
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Password")
                             .font(.subheadline)
@@ -68,11 +69,13 @@ struct LoginView: View {
                                     .padding(.horizontal, 12)
                                     .padding(.trailing, 44)
                                     .frame(minHeight: 44)
+                                    .accessibilityIdentifier("passwordField")
                             } else {
                                 SecureField("Password", text: $viewModel.password)
                                     .padding(.horizontal, 12)
                                     .padding(.trailing, 44)
                                     .frame(minHeight: 44)
+                                    .accessibilityIdentifier("passwordField")
                             }
 
                             Button(action: { viewModel.isPasswordVisible.toggle() }) {
@@ -82,6 +85,7 @@ struct LoginView: View {
                                     .foregroundStyle(.secondary)
                                     .frame(width: 44, height: 44)
                             }
+                            .accessibilityIdentifier("togglePasswordVisibility")
                         }
                         .background(
                             RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -90,19 +94,22 @@ struct LoginView: View {
                     }
                     .padding(.bottom, 16)
 
-                    // ── Error banner ───────────────────────────────────
+                    // ── Error banner ───────────────────────────────────────
                     ErrorBannerView(message: viewModel.errorMessage)
                         .padding(.bottom, viewModel.errorMessage != nil ? 16 : 0)
 
-                    // ── Keep me signed in ──────────────────────────────
+                    // ── Keep me signed in ──────────────────────────────────
                     HStack {
                         Button(action: { viewModel.keepSignedIn.toggle() }) {
                             HStack(spacing: 8) {
                                 Image(systemName: viewModel.keepSignedIn
                                       ? "checkmark.square.fill"
                                       : "square")
+                                    // Spec: Dark navy is used ONLY for the hex 'A' logo
+                                    // and the full-width 'Sign in' button. Use monochrome
+                                    // styles for all other elements.
                                     .foregroundStyle(viewModel.keepSignedIn
-                                                     ? Color("NavyBlue")
+                                                     ? .primary
                                                      : .secondary)
 
                                 Text("Keep me signed in")
@@ -111,12 +118,13 @@ struct LoginView: View {
                             }
                         }
                         .frame(minHeight: 44)
+                        .accessibilityIdentifier("keepSignedInToggle")
 
                         Spacer()
                     }
                     .padding(.bottom, 24)
 
-                    // ── Sign In button ─────────────────────────────────
+                    // ── Sign In button ─────────────────────────────────────
                     Button(action: { viewModel.signIn() }) {
                         Text("Sign in")
                             .font(.headline)
@@ -132,6 +140,7 @@ struct LoginView: View {
                     )
                     .disabled(!viewModel.isSignInEnabled)
                     .padding(.bottom, 32)
+                    .accessibilityIdentifier("signInButton")
 
                     Spacer(minLength: 20)
                 }
