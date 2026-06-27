@@ -1,5 +1,4 @@
 import XCTest
-import AcmeBank
 
 /// XCUITest suite for the Login critical user flow.
 ///
@@ -13,10 +12,13 @@ import AcmeBank
 /// the screen remains on the login view. A future `LoginCoordinator` story will
 /// wire real navigation and expand these tests to assert the post-auth state.
 ///
-/// `import AcmeBank` (non-testable) is enough here: the only symbol we need
-/// from the host module is `OktaConfig`, which is `public`. `@testable` would
-/// require the app target to be built with `-enable-testing`, which the
-/// XcodeGen scheme does not enable for the UITests target.
+/// This file intentionally does NOT `import AcmeBank`. UI-test bundles
+/// (`bundle.ui-testing`) are hosted in a separate `AcmeBankUITests-Runner.app`
+/// and are not linked with `-bundle_loader` against the host app binary, so
+/// references to host-module symbols like `OktaConfig` compile but fail to
+/// link (`Undefined symbol: OktaConfig.load(bundle:)`) — breaking the whole
+/// test target. Anything we need from the host app must be surfaced through
+/// a UI-test-safe seam such as a launch argument or environment variable.
 final class LoginUITests: XCTestCase {
 
     private var app: XCUIApplication!
@@ -30,21 +32,6 @@ final class LoginUITests: XCTestCase {
 
     override func tearDownWithError() throws {
         app = nil
-    }
-
-    // MARK: - Helpers
-
-    /// True iff the app bundle has real Okta credentials injected. UI tests
-    /// that drive a real Okta sign-in are skipped when this is false so CI
-    /// (which has no secrets) stays green; engineers running locally with
-    /// the env vars set get the full end-to-end coverage.
-    ///
-    /// We pattern-match on the enum (rather than adding a derived property
-    /// on `OktaConfig`) to keep the diff for this PR contained to the
-    /// files listed in MBE2EDEM05-24's plan.
-    private var isOktaConfigured: Bool {
-        if case .configured = OktaConfig.load() { return true }
-        return false
     }
 
     // MARK: - Tests
@@ -160,14 +147,22 @@ final class LoginUITests: XCTestCase {
         )
     }
 
-    /// End-to-end Okta sign-in scaffold. Skipped unless real Okta env vars
-    /// are injected into the bundle at build time — CI without secrets sees
-    /// this as a green skip rather than a red failure. The full happy-path
-    /// assertions land alongside the AuthService wiring story (MBE2EDEM05-10);
-    /// for now this is the scaffold that proves the gating compiles and the
-    /// skip path exits cleanly.
+    /// End-to-end Okta sign-in scaffold. Skipped unless the runner exports
+    /// `OKTA_E2E_CONFIGURED=YES` into the test process environment — CI
+    /// without secrets sees this as a green skip rather than a red failure.
+    ///
+    /// The gate intentionally uses only `Foundation` symbols available to
+    /// the UI-test bundle: importing `AcmeBank` to read `OktaConfig.load()`
+    /// directly would compile but fail to link (UI-test bundles are not
+    /// `-bundle_loader`-linked against the host app), taking the entire
+    /// test target down with `Undefined symbols`.
+    ///
+    /// The full happy-path assertions land alongside the AuthService wiring
+    /// story (MBE2EDEM05-10); for now this is the scaffold that proves the
+    /// gating compiles and the skip path exits cleanly.
     func test_signIn_endToEnd_withRealOkta() throws {
-        try XCTSkipUnless(isOktaConfigured, "Okta env vars not set")
+        let oktaConfigured = ProcessInfo.processInfo.environment["OKTA_E2E_CONFIGURED"] == "YES"
+        try XCTSkipUnless(oktaConfigured, "Okta env vars not set")
 
         // TODO: MBE2EDEM05-10 — add sign-in outcome assertions here.
         // Until that story lands, this body just touches the field so the
