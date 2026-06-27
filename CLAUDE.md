@@ -146,9 +146,13 @@ AppCoordinator                  ← top-level route (.login / .landing) [done]
   binary yes/no (e.g. `LandingUITests` skip-gate).
 - `AuthServicing` protocol (`signIn` / `hasPersistedSession` / `signOut`);
   `OktaAuthService` is the production conformer. The Okta SDK call is
-  quarantined behind an internal `DirectAuthFlowDriving` seam. The
-  concrete `DirectAuthenticationFlow` wiring inside `RealDirectAuthFlow`
-  is a follow-up to this composition-root PR.
+  quarantined behind an internal `DirectAuthFlowDriving` seam.
+  `RealDirectAuthFlow` is the ONLY type that imports `OktaDirectAuth`:
+  it constructs a `DirectAuthenticationFlow(issuerURL:clientId:scopes:redirectUri:)`,
+  awaits `flow.start(username, with: .password(password))`, and
+  translates the resulting `Status` into the neutral `FlowOutcome`
+  enum (`.success(idToken:accessToken:refreshToken:)` /
+  `.mfaRequired`).
 - `AuthError` is the ONLY error type that escapes `signIn`. Post-SDK-
   success failures (JWT decode → `.invalidServerResponse`; Keychain
   write → swallowed + logged) MUST be mapped or swallowed so the
@@ -196,7 +200,6 @@ AppCoordinator                  ← top-level route (.login / .landing) [done]
 - Target ≥ 80% line coverage on `Core/` and `Features/`.
 
 ## Deferred Work (not in this PR)
-- Okta SDK driver wiring (real `DirectAuthenticationFlow.start` call replacing the stub)
 - Silent re-auth at cold launch using the persisted refresh token (today the
   cached-session branch falls back to `.login` until this lands)
 - LoginCoordinator / TabBarCoordinator decomposition under AppCoordinator
