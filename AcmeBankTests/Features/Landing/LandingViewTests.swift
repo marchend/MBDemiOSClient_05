@@ -10,12 +10,18 @@ import SwiftUI
 /// comparison is intentionally avoided — committed reference images are
 /// not viable on ephemeral CI runners.
 ///
-/// We additionally assert that the data the view is supposed to render
-/// is reachable from the injected `UserSession`. Since SwiftUI `Text`
-/// does not surface as a `UILabel` (so view-hierarchy traversal would
-/// always fail), the "claims render" assertion is a contract assertion
-/// on the source-of-truth — the session itself — guaranteed because
-/// `LandingView`'s body is a pure function of the injected session.
+/// Note on rendered-claims coverage: SwiftUI `Text` nodes do not surface
+/// as `UILabel`s in the hosting controller's view hierarchy, so we cannot
+/// read back the rendered "Welcome, X" / email strings from these tests.
+/// A previous revision of this file included two tests
+/// (`…_claimsAreDrivenBySession` and `…_claimsChangeWithSession`) that
+/// asserted on the `UserSession` fixture instead, which gave a false
+/// sense of view-layer coverage — they would have passed even if
+/// `LandingView` rendered hardcoded strings. They were removed per
+/// review; the rendered-claims guarantee is now covered structurally
+/// (`LandingView.body` references only `session.displayName` and
+/// `session.email`) and end-to-end by `LandingUITests`, which reads the
+/// real on-screen text via the accessibility tree.
 final class LandingViewTests: XCTestCase {
 
     // iPhone 16 Pro logical points (matches LoginViewSnapshotTests).
@@ -62,33 +68,5 @@ final class LandingViewTests: XCTestCase {
 
         XCTAssertFalse(hc.view.frame.isEmpty,
                        "LandingView should render even when displayName / email are empty")
-    }
-
-    // MARK: - Claims contract
-
-    /// The "Welcome, X" string and the email line are pure functions of
-    /// the injected `UserSession`. Asserting on the session itself
-    /// guarantees the body renders the right strings, because
-    /// `LandingView.body` references only `session.displayName` and
-    /// `session.email`.
-    func test_landingView_claimsAreDrivenBySession() {
-        let session = makeSession(name: "Marc Henderson", email: "marc@acmebank.com")
-        XCTAssertEqual(session.displayName, "Marc Henderson",
-                       "Welcome string is derived from session.displayName")
-        XCTAssertEqual(session.email, "marc@acmebank.com",
-                       "Email line is derived from session.email")
-    }
-
-    /// A different session yields different rendered claims — proves
-    /// the view is not hardcoded to a particular display name (regression
-    /// guard against the prior 'Welcome, UITest User' bootstrap stub).
-    func test_landingView_claimsChangeWithSession() {
-        let alice = makeSession(name: "Alice", email: "alice@acmebank.com")
-        let bob = makeSession(name: "Bob", email: "bob@acmebank.com")
-
-        XCTAssertNotEqual(alice.displayName, bob.displayName,
-                          "LandingView's welcome string must vary with the injected session")
-        XCTAssertNotEqual(alice.email, bob.email,
-                          "LandingView's email line must vary with the injected session")
     }
 }

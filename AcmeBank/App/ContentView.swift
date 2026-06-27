@@ -11,16 +11,13 @@ import SwiftUI
 /// The `LoginViewModel` is built fresh each time the coordinator routes
 /// back to `.login` so a previous sign-in attempt's transient state
 /// (typed credentials, error banner, in-flight spinner) cannot leak
-/// across a sign-out / sign-in cycle. The view's own `@StateObject`
-/// keeps the lifecycle anchored to that single `.login` presentation.
+/// across a sign-out / sign-in cycle. The construction itself is
+/// performed by `LoginRouteView`'s `@StateObject` initialiser (via an
+/// autoclosure) so SwiftUI invokes the factory exactly once per
+/// `.login` presentation rather than on every body evaluation.
 struct ContentView: View {
 
     @EnvironmentObject private var coordinator: AppCoordinator
-
-    /// Production `AuthServicing` used by the `onSignIn` closure.
-    /// Defaulted so previews and tests can substitute a fake without
-    /// touching the real Okta SDK.
-    let authService: AuthServicing
 
     /// Pre-load Okta config once so the not-configured banner can be
     /// surfaced before the user types anything. Equivalent to calling
@@ -28,21 +25,61 @@ struct ContentView: View {
     /// inject a `.notConfigured(...)` value to exercise that path.
     let configProvider: () -> OktaConfig
 
-    init(
-        authService: AuthServicing = OktaAuthService(),
-        configProvider: @escaping () -> OktaConfig = { OktaConfig.load() }
-    ) {
-        self.authService = authService
+    init(configProvider: @escaping () -> OktaConfig = { OktaConfig.load() }) {
         self.configProvider = configProvider
     }
 
     var body: some View {
         switch coordinator.route {
         case .login:
-            LoginView(viewModel: makeLoginViewModel())
+            // Pulling `authService` from the coordinator ensures the
+            // login flow and any future coordinator-driven sign-out
+            // share a single `OktaAuthService` (and therefore a single
+            // `KeychainStore` owner). The default `ContentView()` init
+            // no longer constructs an `OktaAuthService` of its own.
+            LoginRouteView(
+                authService: coordinator.authService,
+                coordinator: coordinator,
+                config: configProvider()
+            )
         case .landing(let session):
             LandingView(session: session)
         }
+    }
+}
+
+/// Per-`.login`-presentation host that owns the `LoginViewModel`.
+///
+/// Pulling this out of `ContentView` accomplishes two things at once:
+///
+///   1. The `@StateObject` here is initialised via an autoclosure, so
+///      `makeLoginViewModel(...)` runs exactly once — when SwiftUI first
+///      mounts this view for a `.login` route — not on every `ContentView`
+///      body re-evaluation. (A previous version constructed a fresh view
+///      model inside `ContentView.body` on every invalidation; the
+///      `@StateObject` inside `LoginView` silently discarded all but
+///      the first, masking the wasted work.)
+///   2. When the coordinator routes `.landing → .login` (sign-out), the
+///      old `LoginRouteView` instance is torn down and a new one is
+///      mounted, which means `@StateObject` re-runs the factory — so
+///      transient state from the previous sign-in attempt cannot leak.
+private struct LoginRouteView: View {
+
+    @StateObject private var viewModel: LoginViewModel
+
+    init(authService: AuthServicing, coordinator: AppCoordinator, config: OktaConfig) {
+        // Autoclosure: SwiftUI invokes this exactly once per view identity.
+        _viewModel = StateObject(
+            wrappedValue: Self.makeLoginViewModel(
+                authService: authService,
+                coordinator: coordinator,
+                config: config
+            )
+        )
+    }
+
+    var body: some View {
+        LoginView(viewModel: viewModel)
     }
 
     // MARK: - Composition
@@ -67,18 +104,29 @@ struct ContentView: View {
     /// If Okta is not configured at build time we pre-populate
     /// `errorMessage` with the not-configured copy so the user sees
     /// what's wrong without having to tap Sign In to discover it.
-    private func makeLoginViewModel() -> LoginViewModel {
+    ///
+    /// The closure captures `viewModel` weakly to break the
+    /// `viewModel → onSignIn → viewModel` retain cycle that would
+    /// otherwise leak every `LoginViewModel` across a sign-out /
+    /// sign-in round-trip. `authService` and `coordinator` are
+    /// captured strongly — both outlive any one `.login` presentation.
+    private static func makeLoginViewModel(
+        authService: AuthServicing,
+        coordinator: AppCoordinator,
+        config: OktaConfig
+    ) -> LoginViewModel {
         let viewModel = LoginViewModel()
 
         // AC: with no OKTA_* env vars, launch to Login with the
         // "Okta is not configured" banner pre-set.
-        if case let .notConfigured(reason) = configProvider() {
+        if case let .notConfigured(reason) = config {
             viewModel.errorMessage =
                 "Okta is not configured on this build — see README. (\(reason))"
         }
 
-        viewModel.onSignIn = { [authService] username, password, keepSignedIn in
+        viewModel.onSignIn = { [authService, coordinator, weak viewModel] username, password, keepSignedIn in
             Task { @MainActor in
+                guard let viewModel else { return }
                 viewModel.isSigningIn = true
                 viewModel.errorMessage = nil
                 defer { viewModel.isSigningIn = false }
@@ -97,7 +145,7 @@ struct ContentView: View {
                     // path to AuthError, so this arm should never fire.
                     // If it does, surface the network copy rather than
                     // a raw Swift error and log for diagnostics.
-                    print("[ContentView] unexpected non-AuthError from signIn: \(error)")
+                    print("[LoginRouteView] unexpected non-AuthError from signIn: \(error)")
                     viewModel.errorMessage = AuthError.network.userMessage
                 }
             }

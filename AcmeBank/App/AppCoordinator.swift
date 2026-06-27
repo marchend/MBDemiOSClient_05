@@ -38,7 +38,14 @@ public final class AppCoordinator: ObservableObject {
 
     /// Auth service used to probe for a persisted session at launch and
     /// (in future) to drive sign-out from inside the app.
-    private let authService: AuthServicing
+    ///
+    /// Exposed (read-only) so `ContentView` can thread the *same*
+    /// instance into the `LoginView`'s `onSignIn` wiring, rather than
+    /// constructing a second `OktaAuthService` at composition time —
+    /// otherwise two parallel owners would touch the Keychain and a
+    /// later sign-out wired to the coordinator's copy would diverge
+    /// from the one that actually performed the sign-in.
+    public let authService: AuthServicing
 
     // MARK: - Initializers
 
