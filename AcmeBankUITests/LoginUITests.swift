@@ -169,9 +169,17 @@ final class LoginUITests: XCTestCase {
     func test_signIn_endToEnd_withRealOkta() throws {
         try XCTSkipUnless(isOktaConfigured, "Okta env vars not set")
 
-        // The full assertions land in the AuthService wiring story; until
-        // then this body just touches the field so the scaffold has a
-        // non-trivial action when Okta IS configured locally.
+        // TODO: MBE2EDEM05-10 — add sign-in outcome assertions here.
+        // Until that story lands, this body just touches the field so the
+        // scaffold has a non-trivial action when Okta IS configured locally;
+        // it must NOT be left as a vacuously-green no-op once MBE2EDEM05-10
+        // wires the real AuthService. Expected follow-up assertions:
+        //   * type real username + password, tap signInButton
+        //   * assert the post-auth root view appears (identifier owned by
+        //     the LoginCoordinator story)
+        //   * assert no `errorBanner` is present on the happy path
+        //   * exercise the bad-credentials path and assert the banner DOES
+        //     appear with the AC #7 copy
         let usernameField = app.textFields["usernameField"]
         XCTAssertTrue(usernameField.waitForExistence(timeout: 5))
         usernameField.tap()

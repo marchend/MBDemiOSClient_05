@@ -14,10 +14,10 @@ struct LoginView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // ── Header strip ─────────────────────────────────────────────────────────────
+            // ── Header strip ──────────────────────────────────────────────────
             OktaHeaderView()
 
-            // ── Scrollable body ──────────────────────────────────────────────────────────
+            // ── Scrollable body ───────────────────────────────────────────────
             ScrollView {
                 VStack(spacing: 0) {
                     Spacer(minLength: 40)
@@ -35,7 +35,7 @@ struct LoginView: View {
                         .padding(.top, 4)
                         .padding(.bottom, 32)
 
-                    // ── Username field ───────────────────────────────────────────────
+                    // ── Username field ────────────────────────────────────────
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Username")
                             .font(.subheadline)
@@ -56,7 +56,7 @@ struct LoginView: View {
                     }
                     .padding(.bottom, 16)
 
-                    // ── Password field ───────────────────────────────────────────────
+                    // ── Password field ────────────────────────────────────────
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Password")
                             .font(.subheadline)
@@ -96,11 +96,15 @@ struct LoginView: View {
                     }
                     .padding(.bottom, 16)
 
-                    // ── Error banner ─────────────────────────────────────────────────
+                    // ── Error banner ──────────────────────────────────────────
                     ErrorBannerView(message: viewModel.errorMessage)
                         .padding(.bottom, viewModel.errorMessage != nil ? 16 : 0)
 
-                    // ── Keep me signed in ────────────────────────────────────────────
+                    // ── Keep me signed in ─────────────────────────────────────
+                    // Disabled mid-flight so the captured `keepSignedIn` value
+                    // dispatched to `onSignIn` can't drift from what the user
+                    // sees on screen — consistent with the username / password
+                    // / Sign In disables above.
                     HStack {
                         Button(action: { viewModel.keepSignedIn.toggle() }) {
                             HStack(spacing: 8) {
@@ -125,8 +129,9 @@ struct LoginView: View {
                         Spacer()
                     }
                     .padding(.bottom, 24)
+                    .disabled(viewModel.isSigningIn)
 
-                    // ── Sign In button ───────────────────────────────────────────────
+                    // ── Sign In button ────────────────────────────────────────
                     // While a sign-in is in flight the button's label collapses to a
                     // ProgressView spinner so the user sees activity and can't fire
                     // a second tap (the button is also `.disabled` via
@@ -162,7 +167,7 @@ struct LoginView: View {
                 .padding(.horizontal, 24)
             }
 
-            // ── Footer ───────────────────────────────────────────────────────────────────
+            // ── Footer ────────────────────────────────────────────────────────
             SecuredByOktaView()
         }
         .background(Color(.systemBackground))
