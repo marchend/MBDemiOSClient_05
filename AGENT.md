@@ -46,7 +46,9 @@ source `AcmeBank/Info.plist` ships sentinel placeholders
 postBuildScript replaces them with values from the build process's
 environment. Missing env vars are NOT a build error — the sentinels
 survive, and `OktaConfig.load()` returns `.notConfigured(reason:)` at
-runtime so the app still launches.
+runtime so the app still launches, and `ContentView` pre-seeds the
+LoginView with an "Okta is not configured on this build — see README."
+banner.
 
 | Env var             | Example                                          |
 |---------------------|--------------------------------------------------|
@@ -54,6 +56,15 @@ runtime so the app still launches.
 | `OKTA_CLIENT_ID`    | `0oa1abc2DEF3ghi4JKL5`                           |
 | `OKTA_REDIRECT_URI` | `com.acmebank.mobile://callback`                 |
 | `OKTA_SCOPES`       | `openid profile offline_access` (space-separated)|
+
+For the `LandingUITests` end-to-end happy-path test, additionally export:
+
+| Env var                  | Purpose                                              |
+|--------------------------|------------------------------------------------------|
+| `OKTA_E2E_CONFIGURED`    | Set to `YES` when the build was made with real OKTA_* env vars (gates the e2e test). |
+| `OKTA_TEST_USERNAME`     | Sign-in identifier typed into the Login screen.       |
+| `OKTA_TEST_PASSWORD`     | Password typed into the Login screen.                 |
+| `OKTA_TEST_DISPLAY_NAME` | Optional. Expected display name on the Landing screen.|
 
 Three ways to set them:
 
@@ -71,52 +82,73 @@ them as scheme environment variables.
 ## Key Directory Structure
 ```
 AcmeBank/
-  App/              ← @main entry + root view (ContentView placeholder → RootView)
+  App/              ← @main entry (AcmeBankApp), AppCoordinator, ContentView
   Core/             ← Auth (OktaConfig, AuthError, UserSession, KeychainStore,
                       AuthServicing, OktaAuthService), Networking, Notifications
   Domain/           ← Models + Repository protocols                [deferred]
   Data/             ← Remote + Mock repository implementations     [deferred]
-  Features/         ← Login, Home, Accounts, Transfer, Cards       [deferred]
+  Features/         ← Login, Landing; Home, Accounts, Transfer, Cards [deferred]
   DesignSystem/     ← Colors, Typography, Assets.xcassets          [deferred]
   Resources/        ← Asset catalog, entitlements, privacy manifest
   Info.plist        ← Hand-rolled; OKTA_* keys ship as sentinels
 AcmeBankTests/      ← XCTest unit tests
-AcmeBankUITests/    ← XCUITest end-to-end tests (one launch smoke test today)
+AcmeBankUITests/    ← XCUITest end-to-end tests (Login, Landing happy path)
 scripts/            ← Build-phase scripts (inject_okta_config.sh)
 project.yml         ← XcodeGen spec — source of truth for .xcodeproj
 setup.sh            ← Post-clone materialisation script
 ```
 
-## Planned Architecture
+## Architecture
 
-### MVVM + Coordinator (deferred — future PR)
+### Composition root (wired)
+- `AcmeBankApp` (`@main`) owns a single `@StateObject AppCoordinator`
+  constructed with `OktaAuthService()`, injected into the view tree via
+  `.environmentObject`.
+- `AppCoordinator` (`@MainActor`, `ObservableObject`) publishes a single
+  `route: AppRoute` of `.login` or `.landing(UserSession)`. Initial
+  route at cold launch:
+    - No persisted refresh token → `.login`
+    - Refresh token present AND a cached `UserSession` available
+      → `.landing(session)`
+    - Refresh token present but no cached `UserSession` (silent re-auth
+      not yet implemented) → `.login`
+- `ContentView` switches on `coordinator.route`. For `.login` it builds
+  a `LoginViewModel` whose `onSignIn` closure calls
+  `OktaAuthService.signIn(...)` and, on success, calls
+  `coordinator.didSignIn(session)`; on `AuthError` it surfaces
+  `error.userMessage`.
+- `LandingView` takes a `UserSession` and renders "Welcome,
+  \(displayName)" + the email. Both labels carry stable accessibility
+  identifiers `landing.welcome` / `landing.email` for XCUITest.
+
+### MVVM + Coordinator (in progress)
 - **View** — SwiftUI `View` struct; renders `@Published` state; zero business logic.
 - **ViewModel** — `final class: ObservableObject`; `@Published` state; calls repos; no SwiftUI imports.
-- **Coordinator** — `ObservableObject`; owns `NavigationStack` path; creates Views+ViewModels; injects deps.
+- **Coordinator** — `ObservableObject`; owns navigation state; creates Views+ViewModels; injects deps.
 - **Repository protocols** in `Domain/`; concrete types in `Data/`; ViewModels depend only on protocols.
 
-### Coordinator Hierarchy (deferred — future PR)
+### Coordinator Hierarchy (planned)
 ```
-AppCoordinator
-  ├── LoginCoordinator   (shown when no session)
-  └── TabBarCoordinator  (shown after login)
+AppCoordinator                  ← top-level route (.login / .landing) [done]
+  ├── LoginCoordinator          (NavigationStack inside .login)       [deferred]
+  └── TabBarCoordinator         (shown after login, replaces .landing)[deferred]
         ├── HomeCoordinator
         ├── TransferCoordinator
         ├── CardsCoordinator
         └── MoreCoordinator
 ```
 
-### Authentication — Okta OIDC (in progress)
+### Authentication — Okta OIDC
 - `OktaConfig` loads `OKTA_ISSUER`, `OKTA_CLIENT_ID`, `OKTA_REDIRECT_URI`,
   `OKTA_SCOPES` from `Info.plist`. Total function: returns
-  `.notConfigured(reason:)` on any failure — never traps.
+  `.notConfigured(reason:)` on any failure — never traps. The
+  `isConfigured` boolean accessor exists for callers that only need a
+  binary yes/no (e.g. `LandingUITests` skip-gate).
 - `AuthServicing` protocol (`signIn` / `hasPersistedSession` / `signOut`);
   `OktaAuthService` is the production conformer. The Okta SDK call is
-  quarantined behind an internal `DirectAuthFlowDriving` seam — the
-  concrete `DirectAuthenticationFlow` wiring lands in the composition-root
-  PR. Until then `RealDirectAuthFlow.start` throws
-  `AuthError.notConfigured("Okta SDK driver wiring lands in PR 4")` so
-  the contract is exercisable but no UI is yet wired in.
+  quarantined behind an internal `DirectAuthFlowDriving` seam. The
+  concrete `DirectAuthenticationFlow` wiring inside `RealDirectAuthFlow`
+  is a follow-up to this composition-root PR.
 - `AuthError` is the ONLY error type that escapes `signIn`. Post-SDK-
   success failures (JWT decode → `.invalidServerResponse`; Keychain
   write → swallowed + logged) MUST be mapped or swallowed so the
@@ -165,12 +197,13 @@ AppCoordinator
 
 ## Deferred Work (not in this PR)
 - Okta SDK driver wiring (real `DirectAuthenticationFlow.start` call replacing the stub)
-- Composition root that injects `OktaAuthService` into the Login flow
-- MVVM + Coordinator pattern (AppCoordinator, LoginCoordinator, TabBarCoordinator, etc.)
+- Silent re-auth at cold launch using the persisted refresh token (today the
+  cached-session branch falls back to `.login` until this lands)
+- LoginCoordinator / TabBarCoordinator decomposition under AppCoordinator
 - Networking layer (APIClient, APIRouter, APIError, RequestInterceptor)
 - Domain models (Account, Transaction, Customer, TransferRequest)
 - Repository protocols + implementations (Remote + Mock)
-- Feature screens (Login, Home/Dashboard, Accounts, Transfer, Cards, More)
+- Feature screens (Home/Dashboard, Accounts, Transfer, Cards, More)
 - Design system (Colors.swift, Typography.swift)
 - Internal Notifications (AppNotification, NotificationPublisher, NotificationKey)
 - Core/Extensions (Decimal+Currency, Date+Greeting, String+Initials)
