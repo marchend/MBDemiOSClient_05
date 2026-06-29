@@ -162,6 +162,49 @@ final class HomeViewModelTests: XCTestCase {
         XCTAssertFalse(message.isEmpty,
                        "Error message must be non-empty so the banner has copy to render")
     }
+
+    // MARK: - Cancellation
+
+    /// Cancelling an in-flight `load()` must NOT overwrite `state`
+    /// with `.error`. The VM's `catch is CancellationError { return }`
+    /// branch exists precisely so the user doesn't see a spurious
+    /// error banner flash when the view disappears mid-fetch.
+    ///
+    /// Mechanics: a `ControllableHomeRepository` configured with
+    /// `cancellationThrows: true` wires a `withTaskCancellationHandler`
+    /// around its continuation, so that when the parent task is
+    /// cancelled the suspended `fetchHome()` re-throws
+    /// `CancellationError()` — mirroring what `BFFHomeRepository` does
+    /// in production when a `URLSession` data task is cancelled. The
+    /// VM should observe that, hit the `catch is CancellationError`
+    /// branch, and leave `state` at `.loading`. A regression that
+    /// replaced the silent `return` with `state = .error(...)` would
+    /// flip this test red.
+    func test_load_cancellation_leavesStateUnchanged() async {
+        let repo = ControllableHomeRepository(cancellationThrows: true)
+        let vm = HomeViewModel(
+            session: makeSession(),
+            repository: repo,
+            onSessionExpired: { XCTFail("cancellation must not session-expire") }
+        )
+
+        let task = Task { await vm.load() }
+
+        // Wait for the VM to publish `.loading` and the repo to be
+        // parked on its continuation.
+        await repo.waitUntilFetching()
+        XCTAssertEqual(vm.state, .loading,
+                       "precondition: VM should be in .loading before we cancel")
+
+        // Cancel — the repository's cancellation handler throws
+        // CancellationError into the awaiting VM, which should hit
+        // the silent-return branch in `load()`.
+        task.cancel()
+        await task.value
+
+        XCTAssertEqual(vm.state, .loading,
+                       "Cancelled load must not overwrite state — the silent CancellationError branch should fire")
+    }
 }
 
 // MARK: - Test doubles
@@ -171,14 +214,39 @@ final class HomeViewModelTests: XCTestCase {
 /// the test can swap from `.failure(...)` to `.success(...)` between
 /// calls without constructing a new VM. Not `@MainActor`-isolated so
 /// it can satisfy the non-isolated `HomeRepositoryProtocol` requirement
-/// the same way `StubHomeRepository` does; the test only mutates
-/// `behaviour` from the main-actor test context between awaits, so
-/// there's no concurrent access in practice.
+/// the same way `StubHomeRepository` does.
+///
+/// ### Thread-safety
+///
+/// `behaviour` is guarded by an `NSLock` so concurrent reads/writes
+/// from a future test that fires two overlapping `Task { await
+/// vm.load() }` calls don't race. The previous implementation relied
+/// on the soft invariant "the test only mutates `behaviour` between
+/// awaits" and opted out of the Sendable checker with
+/// `@unchecked Sendable` and no synchronisation — the compiler can't
+/// enforce that invariant, so any future concurrent-call test would
+/// have silently exhibited a data race. Matching the discipline of
+/// `ControllableHomeRepository` below removes the foot-gun.
 private final class SwappableHomeRepository: HomeRepositoryProtocol, @unchecked Sendable {
-    var behaviour: StubHomeRepository.Behaviour
+
+    private let lock = NSLock()
+    private var _behaviour: StubHomeRepository.Behaviour
+
+    var behaviour: StubHomeRepository.Behaviour {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _behaviour
+        }
+        set {
+            lock.lock()
+            _behaviour = newValue
+            lock.unlock()
+        }
+    }
 
     init(initial: StubHomeRepository.Behaviour) {
-        self.behaviour = initial
+        self._behaviour = initial
     }
 
     func fetchHome() async throws -> HomeDashboard {
@@ -195,6 +263,12 @@ private final class SwappableHomeRepository: HomeRepositoryProtocol, @unchecked 
 /// `finish(with:)`. Lets the test observe the `.loading` state
 /// deterministically (a `StubHomeRepository` returns instantly, so
 /// there's no observable suspension window).
+///
+/// When constructed with `cancellationThrows: true`, the suspended
+/// `fetchHome()` is wrapped in `withTaskCancellationHandler` so that
+/// cancelling the awaiting task resumes the continuation with
+/// `CancellationError()` — used by
+/// `test_load_cancellation_leavesStateUnchanged`.
 private final class ControllableHomeRepository: HomeRepositoryProtocol, @unchecked Sendable {
 
     private let lock = NSLock()
@@ -202,8 +276,29 @@ private final class ControllableHomeRepository: HomeRepositoryProtocol, @uncheck
     private var pendingResult: Result<HomeDashboard, Error>?
     private var fetchingWaiters: [CheckedContinuation<Void, Never>] = []
     private var isFetching: Bool = false
+    private let cancellationThrows: Bool
+
+    init(cancellationThrows: Bool = false) {
+        self.cancellationThrows = cancellationThrows
+    }
 
     func fetchHome() async throws -> HomeDashboard {
+        if cancellationThrows {
+            return try await withTaskCancellationHandler {
+                try await suspendForResult()
+            } onCancel: {
+                // Resume any in-flight continuation with
+                // CancellationError so the awaiting task observes a
+                // genuine cancellation throw (mirrors what URLSession
+                // does when a data task is cancelled).
+                self.cancelInFlight()
+            }
+        } else {
+            return try await suspendForResult()
+        }
+    }
+
+    private func suspendForResult() async throws -> HomeDashboard {
         return try await withCheckedThrowingContinuation { cont in
             lock.lock()
             // If the test already scheduled a result before fetchHome
@@ -224,6 +319,18 @@ private final class ControllableHomeRepository: HomeRepositoryProtocol, @uncheck
             for waiter in waiters {
                 waiter.resume()
             }
+        }
+    }
+
+    private func cancelInFlight() {
+        lock.lock()
+        if let cont = continuation {
+            continuation = nil
+            isFetching = false
+            lock.unlock()
+            cont.resume(throwing: CancellationError())
+        } else {
+            lock.unlock()
         }
     }
 
