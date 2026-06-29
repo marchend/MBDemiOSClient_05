@@ -47,6 +47,55 @@ final class LoginUITests: XCTestCase {
         app = nil
     }
 
+    // MARK: - Helpers
+
+    /// Dismiss the on-screen software keyboard, if it's up.
+    ///
+    /// XCUITest reports an element as "Not hittable" with hit point
+    /// `{-1, -1}` when its on-screen frame is covered by the IME, even
+    /// after `scrollElementToVisible` runs — and on iPhone 16 the
+    /// Sign In button at y≈562 sits squarely under the keyboard once
+    /// the password `SecureField` has been focused.
+    ///
+    /// LoginView's ScrollView carries `.scrollDismissesKeyboard(.immediately)`
+    /// so any drag on the scroll view resigns first responder. Tapping a
+    /// non-interactive SwiftUI `Text` ("Acme Bank") does NOT — SwiftUI
+    /// does not auto-dismiss on tap-outside, unlike the UIKit-storyboard
+    /// "Hide keyboard on tap" pattern. So drive the scroll-dismiss path:
+    /// swipe down on the ScrollView, then wait for `app.keyboards` to
+    /// actually report empty before returning.
+    private func dismissKeyboard() {
+        guard app.keyboards.element.exists else { return }
+
+        // A short downward swipe on the scroll view triggers
+        // `scrollDismissesKeyboard(.immediately)` and resigns first
+        // responder. We pick `swipeDown` (vs `swipeUp`) so the content
+        // doesn't scroll the Sign In button out of frame — at the
+        // natural ScrollView resting position swipeDown is a no-op for
+        // content offset but still counts as a drag for the dismiss
+        // modifier.
+        let scrollView = app.scrollViews.firstMatch
+        if scrollView.exists {
+            scrollView.swipeDown()
+        } else {
+            // Defensive fallback: tap near the top of the screen, well
+            // above any text field, to attempt a resignFirstResponder.
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.05)).tap()
+        }
+
+        // Wait for the keyboard to actually disappear before the caller
+        // tries to tap an element that was previously occluded. Without
+        // this we race the dismiss animation and the next tap can still
+        // land while the keyboard is mid-collapse — XCUITest reports
+        // "Not hittable" / hit point {-1, -1} just like before.
+        let keyboardGone = NSPredicate(format: "exists == false")
+        let expectation = XCTNSPredicateExpectation(
+            predicate: keyboardGone,
+            object: app.keyboards.element
+        )
+        _ = XCTWaiter().wait(for: [expectation], timeout: 3.0)
+    }
+
     // MARK: - Tests
 
     /// The login screen renders with the username field, password field, and
@@ -98,6 +147,12 @@ final class LoginUITests: XCTestCase {
             signInButton.isEnabled,
             "Sign In button should be enabled after entering username and password"
         )
+
+        // Dismiss the keyboard so the Sign In button — which on iPhone 16
+        // sits beneath the IME after the SecureField is focused — becomes
+        // hittable. Without this, XCUITest reports hit point {-1, -1} and
+        // the tap fails with "Not hittable".
+        dismissKeyboard()
 
         // Tap the button — onSignIn now drives the real OktaAuthService.
         // Without real Okta config the call returns AuthError.notConfigured

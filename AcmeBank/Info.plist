@@ -36,12 +36,12 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>OKTA_ISSUER</key>
-	<string>__OKTA_ISSUER_UNSET__</string>
+	<string>$(OKTA_ISSUER)</string>
 	<key>OKTA_CLIENT_ID</key>
-	<string>__OKTA_CLIENT_ID_UNSET__</string>
+	<string>$(OKTA_CLIENT_ID)</string>
 	<key>OKTA_REDIRECT_URI</key>
-	<string>__OKTA_REDIRECT_URI_UNSET__</string>
+	<string>$(OKTA_REDIRECT_URI)</string>
 	<key>OKTA_SCOPES</key>
-	<string>__OKTA_SCOPES_UNSET__</string>
+	<string>$(OKTA_SCOPES)</string>
 </dict>
 </plist>

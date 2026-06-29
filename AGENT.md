@@ -23,7 +23,7 @@ authoritative context document for all agents working on the project.
 
 ## How to Run Locally
 ```bash
-./setup.sh          # installs XcodeGen, generates .xcodeproj, opens Xcode
+./setup.sh          # installs XcodeGen, writes Config/Secrets.local.xcconfig, generates .xcodeproj
 ```
 Manual fallback:
 ```bash
@@ -40,15 +40,28 @@ Or `Cmd+U` in Xcode on the `AcmeBank` scheme.
 
 ## Okta configuration
 
-The app reads four Okta values at runtime from its `Info.plist`. The
-source `AcmeBank/Info.plist` ships sentinel placeholders
-(`__OKTA_<KEY>_UNSET__`); the `scripts/inject_okta_config.sh`
-postBuildScript replaces them with values from the build process's
-environment. Missing env vars are NOT a build error — the sentinels
-survive, and `OktaConfig.load()` returns `.notConfigured(reason:)` at
-runtime so the app still launches, and `ContentView` pre-seeds the
-LoginView with an "Okta is not configured on this build — see README."
-banner.
+The app reads four Okta values at runtime from its `Info.plist`. Those
+keys are wired as build-setting references — `$(OKTA_ISSUER)`,
+`$(OKTA_CLIENT_ID)`, `$(OKTA_REDIRECT_URI)`, `$(OKTA_SCOPES)` — and
+Xcode's `ProcessInfoPlistFile` expands them on every build. The values
+come from two xcconfig files in `Config/`:
+
+- `Config/Secrets.example.xcconfig` *(committed)* ships placeholder
+  defaults (`https://placeholder.invalid/oauth2/default`,
+  `PLACEHOLDER_CLIENT_ID`, …) so the project builds with no secrets
+  present. `project.yml` wires this file as the base `configFiles:` for
+  the `AcmeBank` target (Debug + Release).
+- `Config/Secrets.local.xcconfig` *(gitignored)* is `#include?`d by the
+  example file and overrides those values with real credentials.
+  `setup.sh` writes this file from exported `OKTA_*` env vars at
+  project-generation time; CI does the same from job-level secrets.
+
+When `Secrets.local.xcconfig` is absent the example placeholders survive
+into the built bundle. `OktaConfig.load()` recognises both the
+`placeholder.invalid` URL fragment and the `PLACEHOLDER_` prefix
+(alongside the legacy `__OKTA_<KEY>_UNSET__` sentinel) and returns
+`.notConfigured(reason:)`, and `ContentView` pre-seeds the LoginView
+with an "Okta is not configured on this build — see README." banner.
 
 | Env var             | Example                                          |
 |---------------------|--------------------------------------------------|
@@ -56,6 +69,10 @@ banner.
 | `OKTA_CLIENT_ID`    | `0oa1abc2DEF3ghi4JKL5`                           |
 | `OKTA_REDIRECT_URI` | `com.acmebank.mobile://callback`                 |
 | `OKTA_SCOPES`       | `openid profile offline_access` (space-separated)|
+
+These four vars are consumed by `setup.sh` at project-generation time
+(they get written into `Config/Secrets.local.xcconfig`); they do NOT
+need to be present in the build/launch environment.
 
 For the `LandingUITests` end-to-end happy-path test, additionally export:
 
@@ -66,18 +83,14 @@ For the `LandingUITests` end-to-end happy-path test, additionally export:
 | `OKTA_TEST_PASSWORD`     | Password typed into the Login screen.                 |
 | `OKTA_TEST_DISPLAY_NAME` | Optional. Expected display name on the Landing screen.|
 
-Three ways to set them:
+### xcconfig gotcha: `://` in URLs
 
-1. **Shell export** before `xed .` — works when Xcode inherits the
-   shell environment.
-2. **Xcode scheme environment variables** (Edit Scheme → Run / Test →
-   Arguments → Environment Variables) — survives Finder-launched Xcode.
-3. **CI secrets** exported into the job env before `xcodebuild`.
-
-**`xcodebuild` subshell caveat:** `xcodebuild` does NOT inherit the
-calling job's env by default. Either pass values inline as build
-settings (`xcrun xcodebuild ... OKTA_ISSUER="$OKTA_ISSUER" ...`) or set
-them as scheme environment variables.
+A bare `//` in an xcconfig starts an end-of-line comment, so a URL like
+`https://example.okta.com/...` must be escaped as
+`https:/$()/example.okta.com/...` — the `$()` is an empty build-setting
+reference that breaks up the `//` token without changing the resulting
+string. `setup.sh` does this automatically; the committed
+`Config/Secrets.example.xcconfig` shows the pattern for hand-edited files.
 
 ## Key Directory Structure
 ```
@@ -90,10 +103,13 @@ AcmeBank/
   Features/         ← Login, Landing; Home, Accounts, Transfer, Cards [deferred]
   DesignSystem/     ← Colors, Typography, Assets.xcassets          [deferred]
   Resources/        ← Asset catalog, entitlements, privacy manifest
-  Info.plist        ← Hand-rolled; OKTA_* keys ship as sentinels
+  Info.plist        ← Hand-rolled; OKTA_* keys reference $(OKTA_*) build settings
 AcmeBankTests/      ← XCTest unit tests
 AcmeBankUITests/    ← XCUITest end-to-end tests (Login, Landing happy path)
-scripts/            ← Build-phase scripts (inject_okta_config.sh)
+Config/             ← xcconfig files
+  Secrets.example.xcconfig   ← committed; placeholder values + #include? of local
+  Secrets.local.xcconfig     ← gitignored; written by setup.sh from OKTA_* env vars
+scripts/            ← Misc dev/CI scripts (no build-phase scripts)
 project.yml         ← XcodeGen spec — source of truth for .xcodeproj
 setup.sh            ← Post-clone materialisation script
 ```
