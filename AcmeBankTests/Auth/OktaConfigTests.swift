@@ -78,6 +78,59 @@ final class OktaConfigTests: XCTestCase {
         XCTAssertTrue(reason.contains(OktaConfig.Key.scopes), reason)
     }
 
+    // MARK: - xcconfig placeholder detection
+
+    /// When `Secrets.local.xcconfig` is absent the placeholder issuer
+    /// `https://placeholder.invalid/oauth2/default` from
+    /// `Secrets.example.xcconfig` survives into the built plist. The
+    /// loader must reject it so the app never tries to talk to
+    /// `placeholder.invalid`.
+    func test_load_returnsNotConfigured_whenIssuerIsPlaceholderInvalid() {
+        var values = validValues()
+        values[OktaConfig.Key.issuer] = "https://placeholder.invalid/oauth2/default"
+
+        guard case let .notConfigured(reason) = OktaConfig.resolve(lookup: lookup(values)) else {
+            return XCTFail("expected .notConfigured")
+        }
+        XCTAssertTrue(reason.contains(OktaConfig.Key.issuer),
+                      "reason should name the placeholder-valued key, got: \(reason)")
+    }
+
+    /// Companion to the issuer test: client id placeholder is `PLACEHOLDER_CLIENT_ID`
+    /// (different shape — no URL involved, just a prefix match).
+    func test_load_returnsNotConfigured_whenClientIdIsPlaceholderPrefix() {
+        var values = validValues()
+        values[OktaConfig.Key.clientId] = "PLACEHOLDER_CLIENT_ID"
+
+        guard case let .notConfigured(reason) = OktaConfig.resolve(lookup: lookup(values)) else {
+            return XCTFail("expected .notConfigured")
+        }
+        XCTAssertTrue(reason.contains(OktaConfig.Key.clientId),
+                      "reason should name the placeholder-valued key, got: \(reason)")
+    }
+
+    /// Regression guard for the "no `Secrets.local.xcconfig`" runtime case:
+    /// every key carries its example-xcconfig placeholder value, and the
+    /// diagnostic must name all four so a developer immediately sees which
+    /// build setting failed to expand.
+    func test_load_returnsNotConfigured_whenAllExamplePlaceholderValuesPresent() {
+        let allPlaceholders: [String: Any] = [
+            OktaConfig.Key.issuer: "https://placeholder.invalid/oauth2/default",
+            OktaConfig.Key.clientId: "PLACEHOLDER_CLIENT_ID",
+            OktaConfig.Key.redirectURI: "com.acmebank.mobile://callback",
+            OktaConfig.Key.scopes: "openid profile offline_access"
+        ]
+        guard case let .notConfigured(reason) = OktaConfig.resolve(lookup: lookup(allPlaceholders)) else {
+            return XCTFail("expected .notConfigured, got configured for example-xcconfig defaults")
+        }
+        // The issuer + clientId carry placeholder values; redirectURI and
+        // scopes happen to be real-looking in the example xcconfig (only
+        // the credential-bearing keys use placeholder markers). So the
+        // diagnostic must at minimum name those two.
+        XCTAssertTrue(reason.contains(OktaConfig.Key.issuer), reason)
+        XCTAssertTrue(reason.contains(OktaConfig.Key.clientId), reason)
+    }
+
     // MARK: - Malformed URL
 
     func test_load_returnsNotConfigured_whenIssuerIsMalformedURL() {
@@ -113,9 +166,10 @@ final class OktaConfigTests: XCTestCase {
     // MARK: - Public API smoke test
 
     func test_load_withMainBundle_doesNotCrash() {
-        // The main bundle in the test host either has sentinels (no env
-        // vars) or real values (CI with env vars set). Either way, `load`
-        // must be total — no traps, no force-unwraps.
+        // The main bundle in the test host either has placeholders (no
+        // env vars / no Secrets.local.xcconfig) or real values (CI with
+        // env vars set). Either way, `load` must be total — no traps,
+        // no force-unwraps.
         _ = OktaConfig.load()
     }
 

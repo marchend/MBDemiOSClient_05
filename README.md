@@ -13,8 +13,10 @@ cd <repo>
 ./setup.sh
 ```
 
-`setup.sh` installs XcodeGen (if missing), generates `AcmeBank.xcodeproj`
-from `project.yml`, and opens the project in Xcode.
+`setup.sh` installs XcodeGen (if missing), writes
+`Config/Secrets.local.xcconfig` from any exported `OKTA_*` env vars,
+generates `AcmeBank.xcodeproj` from `project.yml`, and opens the project
+in Xcode.
 
 **Manual fallback** (for environments that block shell scripts):
 ```bash
@@ -36,13 +38,28 @@ xcodebuild test -scheme AcmeBank \
 
 ## Okta configuration
 
-The app reads four Okta values at runtime from its `Info.plist`. The
-source `AcmeBank/Info.plist` ships sentinel placeholders
-(`__OKTA_<KEY>_UNSET__`); the `scripts/inject_okta_config.sh`
-postBuildScript replaces them with values from the build process's
-environment. Missing env vars are NOT a build error — the sentinels
-survive, and `OktaConfig.load()` returns `.notConfigured(reason:)` at
-runtime so the app still launches.
+The app reads four Okta values at runtime from its `Info.plist`. Those
+keys are wired as build-setting references — `$(OKTA_ISSUER)` etc — and
+Xcode's `ProcessInfoPlistFile` expands them on every build. The values
+come from two xcconfig files:
+
+- `Config/Secrets.example.xcconfig` *(committed)* ships placeholder
+  values (`https://placeholder.invalid/oauth2/default`,
+  `PLACEHOLDER_CLIENT_ID`, …) so the project builds without any secrets
+  present. When these placeholders survive into the built bundle,
+  `OktaConfig.load()` recognises them and returns
+  `.notConfigured(reason:)` — the app launches with the "Okta is not
+  configured on this build — see README." banner instead of trying to
+  reach `placeholder.invalid`.
+- `Config/Secrets.local.xcconfig` *(gitignored)* is `#include?`d by the
+  example file and overrides those values with real credentials.
+  `setup.sh` writes this file from your exported `OKTA_*` env vars; for
+  CI, the same step runs from secrets exposed to the job. Never commit
+  this file — `.gitignore` enforces it.
+
+The four env vars below are consumed by `setup.sh` at
+project-generation time (they are written into the xcconfig); they do
+NOT need to be set in the build/launch environment.
 
 | Env var             | Example                                          |
 |---------------------|--------------------------------------------------|
@@ -51,53 +68,42 @@ runtime so the app still launches.
 | `OKTA_REDIRECT_URI` | `com.acmebank.mobile://callback`                 |
 | `OKTA_SCOPES`       | `openid profile offline_access` (space-separated)|
 
-### Three ways to set them
+### Typical local flow
 
-1. **Shell export** (Xcode launched from the same shell — `xed .`):
-   ```bash
-   export OKTA_ISSUER='https://example.okta.com/oauth2/default'
-   export OKTA_CLIENT_ID='0oa1abc2DEF3ghi4JKL5'
-   export OKTA_REDIRECT_URI='com.acmebank.mobile://callback'
-   export OKTA_SCOPES='openid profile offline_access'
-   xed .
-   ```
-2. **Xcode scheme environment variables**: Product → Scheme → Edit Scheme
-   → Run / Test → Arguments → Environment Variables. Add the four
-   `OKTA_*` keys. This is the most reliable path because it survives
-   Xcode being launched from Finder.
-3. **CI secrets**: GitHub Actions exports them into the job env before
-   `xcodebuild`. The build script copies them into the built Info.plist.
+```bash
+export OKTA_ISSUER='https://example.okta.com/oauth2/default'
+export OKTA_CLIENT_ID='0oa1abc2DEF3ghi4JKL5'
+export OKTA_REDIRECT_URI='com.acmebank.mobile://callback'
+export OKTA_SCOPES='openid profile offline_access'
+./setup.sh           # writes Config/Secrets.local.xcconfig, runs xcodegen
+```
 
-### `xcodebuild` subshell caveat
+After merging this PR you must re-run `./setup.sh` (or
+`xcodegen generate`) once so the regenerated `AcmeBank.xcodeproj` picks
+up the new `configFiles:` wiring.
 
-`xcodebuild` runs build phases in a clean subshell that does NOT
-automatically inherit the calling job's environment. If your CI job
-exports `OKTA_ISSUER` at the job level but the `xcodebuild` step doesn't
-see it, either:
+### xcconfig gotcha: `://` in URLs
 
-- pass values inline as build settings:
-  ```bash
-  xcrun xcodebuild test -scheme AcmeBank \
-    -destination 'platform=iOS Simulator,name=iPhone 16' \
-    OKTA_ISSUER="$OKTA_ISSUER" \
-    OKTA_CLIENT_ID="$OKTA_CLIENT_ID" \
-    OKTA_REDIRECT_URI="$OKTA_REDIRECT_URI" \
-    OKTA_SCOPES="$OKTA_SCOPES"
-  ```
-- or set them as scheme environment variables (see option 2 above),
-  which `xcodebuild` does read.
+A bare `//` in an xcconfig starts an end-of-line comment, so URLs like
+`https://example.okta.com/...` must be escaped as
+`https:/$()/example.okta.com/...`. `setup.sh` does this automatically;
+the committed `Config/Secrets.example.xcconfig` shows the pattern for
+hand-edited files.
 
 ## Project Structure
 
 ```
 AcmeBank/           ← SwiftUI source root (auto-discovered by project.yml globs)
   App/              ← Entry point + root view (ContentView placeholder today)
-  Core/Auth/        ← OktaConfig loader (this PR)
+  Core/Auth/        ← OktaConfig loader, OktaAuthService, KeychainStore
   Resources/        ← Asset catalog, entitlements, privacy manifest
-  Info.plist        ← Hand-rolled; OKTA_* keys ship as sentinels
+  Info.plist        ← Hand-rolled; OKTA_* keys reference $(OKTA_*) build settings
 AcmeBankTests/      ← XCTest unit tests
 AcmeBankUITests/    ← XCUITest end-to-end tests
-scripts/            ← Build-phase scripts (inject_okta_config.sh)
+Config/             ← xcconfig files
+  Secrets.example.xcconfig   ← committed; placeholder values + #include? of local
+  Secrets.local.xcconfig     ← gitignored; written by setup.sh from OKTA_* env vars
+scripts/            ← Misc dev/CI scripts (no build-phase scripts)
 project.yml         ← XcodeGen project spec (source of truth for .xcodeproj)
 setup.sh            ← Post-clone one-shot setup
 ```
