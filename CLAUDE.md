@@ -38,23 +38,26 @@ xcodebuild test -scheme AcmeBank \
 ```
 Or `Cmd+U` in Xcode on the `AcmeBank` scheme.
 
-## Okta configuration
+## Runtime configuration (Okta + API_BASE_URL)
 
-The app reads four Okta values at runtime from its `Info.plist`. Those
-keys are wired as build-setting references — `$(OKTA_ISSUER)`,
-`$(OKTA_CLIENT_ID)`, `$(OKTA_REDIRECT_URI)`, `$(OKTA_SCOPES)` — and
-Xcode's `ProcessInfoPlistFile` expands them on every build. The values
-come from two xcconfig files in `Config/`:
+The app reads five build-time values at runtime from its `Info.plist`:
+`OKTA_ISSUER`, `OKTA_CLIENT_ID`, `OKTA_REDIRECT_URI`, `OKTA_SCOPES`, and
+`API_BASE_URL`. All five keys are wired as build-setting references —
+`$(OKTA_ISSUER)`, …, `$(API_BASE_URL)` — and Xcode's
+`ProcessInfoPlistFile` expands them on every build. The values come
+from two xcconfig files in `Config/`:
 
 - `Config/Secrets.example.xcconfig` *(committed)* ships placeholder
   defaults (`https://placeholder.invalid/oauth2/default`,
-  `PLACEHOLDER_CLIENT_ID`, …) so the project builds with no secrets
-  present. `project.yml` wires this file as the base `configFiles:` for
-  the `AcmeBank` target (Debug + Release).
+  `PLACEHOLDER_CLIENT_ID`, `https://placeholder.invalid` for
+  `API_BASE_URL`, …) so the project builds with no secrets present.
+  `project.yml` wires this file as the base `configFiles:` for the
+  `AcmeBank` target (Debug + Release).
 - `Config/Secrets.local.xcconfig` *(gitignored)* is `#include?`d by the
   example file and overrides those values with real credentials.
-  `setup.sh` writes this file from exported `OKTA_*` env vars at
-  project-generation time; CI does the same from job-level secrets.
+  `setup.sh` writes this file from exported `OKTA_*` + `API_BASE_URL`
+  env vars at project-generation time; CI does the same from
+  job-level secrets.
 
 When `Secrets.local.xcconfig` is absent the example placeholders survive
 into the built bundle. `OktaConfig.load()` recognises both the
@@ -62,6 +65,9 @@ into the built bundle. `OktaConfig.load()` recognises both the
 (alongside the legacy `__OKTA_<KEY>_UNSET__` sentinel) and returns
 `.notConfigured(reason:)`, and `ContentView` pre-seeds the LoginView
 with an "Okta is not configured on this build — see README." banner.
+`AppConfig.apiBaseURL` applies the same `placeholder.invalid` rejection
+so a Home fetch on an un-configured build throws
+`APIError.notConfigured` instead of hitting the placeholder host.
 
 | Env var             | Example                                          |
 |---------------------|--------------------------------------------------|
@@ -69,8 +75,9 @@ with an "Okta is not configured on this build — see README." banner.
 | `OKTA_CLIENT_ID`    | `0oa1abc2DEF3ghi4JKL5`                           |
 | `OKTA_REDIRECT_URI` | `com.acmebank.mobile://callback`                 |
 | `OKTA_SCOPES`       | `openid profile offline_access` (space-separated)|
+| `API_BASE_URL`      | `https://bff.dev.acmebank.example.com`           |
 
-These four vars are consumed by `setup.sh` at project-generation time
+These five vars are consumed by `setup.sh` at project-generation time
 (they get written into `Config/Secrets.local.xcconfig`); they do NOT
 need to be present in the build/launch environment.
 
@@ -95,20 +102,20 @@ string. `setup.sh` does this automatically; the committed
 ## Key Directory Structure
 ```
 AcmeBank/
-  App/              ← @main entry (AcmeBankApp), AppCoordinator, ContentView
+  App/              ← @main entry (AcmeBankApp), AppCoordinator, ContentView, AppConfig
   Core/             ← Auth (OktaConfig, AuthError, UserSession, KeychainStore,
                       AuthServicing, OktaAuthService), Networking, Notifications
   Domain/           ← Models + Repository protocols                [deferred]
   Data/             ← Remote + Mock repository implementations     [deferred]
-  Features/         ← Login, Landing; Home, Accounts, Transfer, Cards [deferred]
+  Features/         ← Login, Landing, Home (Model + Data wired); Accounts, Transfer, Cards [deferred]
   DesignSystem/     ← Colors, Typography, Assets.xcassets          [deferred]
   Resources/        ← Asset catalog, entitlements, privacy manifest
-  Info.plist        ← Hand-rolled; OKTA_* keys reference $(OKTA_*) build settings
+  Info.plist        ← Hand-rolled; OKTA_* + API_BASE_URL keys reference $(…) build settings
 AcmeBankTests/      ← XCTest unit tests
 AcmeBankUITests/    ← XCUITest end-to-end tests (Login, Landing happy path)
 Config/             ← xcconfig files
   Secrets.example.xcconfig   ← committed; placeholder values + #include? of local
-  Secrets.local.xcconfig     ← gitignored; written by setup.sh from OKTA_* env vars
+  Secrets.local.xcconfig     ← gitignored; written by setup.sh from OKTA_* + API_BASE_URL env vars
 scripts/            ← Misc dev/CI scripts (no build-phase scripts)
 project.yml         ← XcodeGen spec — source of truth for .xcodeproj
 setup.sh            ← Post-clone materialisation script
@@ -154,6 +161,20 @@ AppCoordinator                  ← top-level route (.login / .landing) [done]
         └── MoreCoordinator
 ```
 
+### Post-login routing + Log out / 401 contract (Home story)
+- **Post-login destination is `HomeView`.** When `coordinator.didSignIn`
+  fires, the route flips to `.home(session)` (today `.landing(session)`
+  until the Home feature lands). The Landing screen is a stepping-stone
+  retained for the e2e happy-path; the production destination is Home.
+- **`SessionStore.signOut()` is the ONE routing target shared by the
+  Log out button and every 401-on-an-authenticated-request path.** Both
+  call sites converge on this single function so the app can never end
+  up in a "logged out in memory but the UI still shows the old session"
+  state. `BFFHomeRepository` (and every future repository) maps HTTP 401
+  to `APIError.unauthorized`; the consuming ViewModel forwards that to
+  `SessionStore.signOut()`, which clears the Keychain + cached
+  `UserSession` and flips the coordinator route back to `.login`.
+
 ### Authentication — Okta OIDC
 - `OktaConfig` loads `OKTA_ISSUER`, `OKTA_CLIENT_ID`, `OKTA_REDIRECT_URI`,
   `OKTA_SCOPES` from `Info.plist`. Total function: returns
@@ -191,14 +212,34 @@ AppCoordinator                  ← top-level route (.login / .landing) [done]
   `authTimestamp`, `deviceName`. Built by `UserSession.make(idTokenJWT:...)`
   via base64URL-decode of the JWT payload. Never store in `UserDefaults`; inject it.
 
-### Networking (deferred — future PR)
-- `APIClient` wraps `URLSession`; decodes via `.convertFromSnakeCase` + `.iso8601`.
-- `APIRouter` enum expresses all endpoints with `path`, `method`, `body`, `queryItems`.
-- Base URL read from `Info.plist` key `API_BASE_URL` (injected by xcconfig — never hardcode).
-- HTTP 401 → `AppNotification.sessionExpired` + `APIError.unauthorized`.
+### Networking + Home repository (wired)
+- `APIError` (currently in `Features/Home/Data/HomeRepositoryProtocol.swift`,
+  will graduate to `Core/Networking/` when a second repository lands):
+  `.unauthorized` / `.serverError(status:)` / `.network` /
+  `.decoding(reason)` / `.notConfigured(reason)`.
+- `BFFHomeRepository` is the production `HomeRepositoryProtocol`
+  conformer. Calls `GET {API_BASE_URL}/v1/home`, sets
+  `Authorization: Bearer <token>` + `Accept: application/json`,
+  decodes with `.convertFromSnakeCase` + `.iso8601`. **Identity is in
+  the token, never in the URL** — the path is the bare `/v1/home` with
+  no `customerId`/`cif` query.
+- `StubHomeRepository` (fixture-backed, "bankuser.one") is provided for
+  previews + tests ONLY; never wire it from a release code path.
+- Decoder strategies for every future repository: `JSONDecoder` with
+  `keyDecodingStrategy = .convertFromSnakeCase` and
+  `dateDecodingStrategy = .iso8601`. Money is `Decimal`, not `Double`.
+
+### Cross-tier generated types
+- `Generated/acmebank-bff-home-v1/` holds the openapi-generator output
+  for the Home contract. The tree is agent-immutable — if a type is
+  wrong, the spec is wrong (regenerate; never hand-edit). The in-app
+  `HomeDashboard` / `Customer` / `Account` / `Transaction` value types
+  are deliberately hand-rolled so money can be `Decimal` (not
+  `Double`) and `AccountType` can tolerate unknown wire values; field
+  names + snake_case wire shape stay pinned to the generated contract.
 
 ### Domain Models (deferred — future PR)
-`Account`, `Transaction`, `Customer`, `TransferRequest` — all `Codable` value types.
+`TransferRequest` — `Codable` value type.
 
 ### Internal Notifications (deferred — future PR)
 - `AppNotification` typed `Notification.Name` constants; `NotificationPublisher` static helper.
@@ -219,16 +260,14 @@ AppCoordinator                  ← top-level route (.login / .landing) [done]
 - Silent re-auth at cold launch using the persisted refresh token (today the
   cached-session branch falls back to `.login` until this lands)
 - LoginCoordinator / TabBarCoordinator decomposition under AppCoordinator
-- Networking layer (APIClient, APIRouter, APIError, RequestInterceptor)
-- Domain models (Account, Transaction, Customer, TransferRequest)
-- Repository protocols + implementations (Remote + Mock)
-- Feature screens (Home/Dashboard, Accounts, Transfer, Cards, More)
+- Networking shared layer (APIClient, APIRouter, RequestInterceptor) — `APIError` already shipped with Home
+- `SessionStore` extraction (today the coordinator carries the signOut hook)
+- `HomeView` + `HomeViewModel` (the data layer is wired; the screen is next)
+- Other feature screens (Accounts, Transfer, Cards, More)
 - Design system (Colors.swift, Typography.swift)
 - Internal Notifications (AppNotification, NotificationPublisher, NotificationKey)
 - Core/Extensions (Decimal+Currency, Date+Greeting, String+Initials)
 - SwiftLint config (`.swiftlint.yml`)
-- xcconfig files for API_BASE_URL injection
-- Home Dashboard BFF integration (`GET /v1/home`, HomeDashboard payload)
 
 ## Git Workflow
 

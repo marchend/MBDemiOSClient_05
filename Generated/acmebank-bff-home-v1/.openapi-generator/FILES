@@ -1,0 +1,6 @@
+OpenAPIClient/Classes/OpenAPIs/Models/AccountDto.swift
+OpenAPIClient/Classes/OpenAPIs/Models/AccountsResponse.swift
+OpenAPIClient/Classes/OpenAPIs/Models/CustomerDto.swift
+OpenAPIClient/Classes/OpenAPIs/Models/HomeDashboard.swift
+OpenAPIClient/Classes/OpenAPIs/Models/TransactionDto.swift
+OpenAPIClient/Classes/OpenAPIs/Models/TransactionsResponse.swift
