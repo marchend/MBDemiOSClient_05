@@ -43,5 +43,7 @@
 	<string>$(OKTA_REDIRECT_URI)</string>
 	<key>OKTA_SCOPES</key>
 	<string>$(OKTA_SCOPES)</string>
+	<key>API_BASE_URL</key>
+	<string>$(API_BASE_URL)</string>
 </dict>
 </plist>

@@ -1,0 +1,13 @@
+{
+  "files": [
+    "OpenAPIClient/Classes/OpenAPIs/Models/AccountDto.swift",
+    "OpenAPIClient/Classes/OpenAPIs/Models/AccountsResponse.swift",
+    "OpenAPIClient/Classes/OpenAPIs/Models/CustomerDto.swift",
+    "OpenAPIClient/Classes/OpenAPIs/Models/HomeDashboard.swift",
+    "OpenAPIClient/Classes/OpenAPIs/Models/TransactionDto.swift",
+    "OpenAPIClient/Classes/OpenAPIs/Models/TransactionsResponse.swift"
+  ],
+  "generatorVersion": "7.7.0",
+  "specSha": "70b5ad19d331e2e996339b91b0759f30ec9f2032fda5f7071e057c574797412f",
+  "stack": "ios"
+}
