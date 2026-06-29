@@ -4,9 +4,18 @@ import XCTest
 /// Decoding tests for the `HomeDashboard` value types against the
 /// `acmebank-bff-home-v1` contract wire shape.
 ///
-/// These tests are the canonical specification of how the app reads the
-/// BFF payload — if a contract field is renamed and the generator
-/// regenerates, this file is the first to flip red.
+/// **This file IS the app-side contract-conformance drift gate** for
+/// the Home boundary. `Generated/acmebank-bff-home-v1/` is not compiled
+/// into the app target (see `project.yml`), so a renamed wire field
+/// would not produce a Swift build error on its own. The tests below
+/// — particularly `test_contractCoverage_everyWireFieldFromV1HomeIsRead`
+/// — assert every snake_case field name in the contract is consumed by
+/// the decoder. If the BFF or `scripts/contract-gate.py`'s regenerated
+/// tree renames a field, the corresponding assertion here flips red.
+///
+/// Any change to `HomeDashboard.swift` MUST land alongside an update to
+/// this file (and vice versa). Reviewers: treat this as the conformance
+/// gate, not a secondary check.
 final class HomeDashboardDecodingTests: XCTestCase {
 
     // MARK: - Decoder under test
@@ -19,6 +28,62 @@ final class HomeDashboardDecodingTests: XCTestCase {
         d.keyDecodingStrategy = .convertFromSnakeCase
         d.dateDecodingStrategy = .iso8601
         return d
+    }
+
+    // MARK: - Contract-coverage gate
+
+    /// Drift gate: every snake_case wire field documented in
+    /// `contracts/acmebank-bff-home-v1.openapi.yaml` for the
+    /// `HomeDashboard` / `CustomerDto` / `AccountDto` / `TransactionDto`
+    /// schemas is read by the decoder into a non-default value here.
+    ///
+    /// If a BFF contract change renames a field (e.g. `masked_number`
+    /// → `account_number_masked`), `convertFromSnakeCase` will fail to
+    /// populate the corresponding Swift property, the asserted value
+    /// will fall back to its default (or the decode will throw), and
+    /// this test flips red. That is the in-app contract-drift signal.
+    func test_contractCoverage_everyWireFieldFromV1HomeIsRead() throws {
+        let dashboard = try makeDecoder().decode(HomeDashboard.self, from: Self.bankuserOneJSON)
+
+        // ── customer (CustomerDto) ────────────────────────────────
+        // wire: id, first_name, last_name, email, phone_number
+        XCTAssertEqual(dashboard.customer.id, "cust_bankuser_one", "wire: customer.id")
+        XCTAssertEqual(dashboard.customer.firstName, "Bank", "wire: customer.first_name")
+        XCTAssertEqual(dashboard.customer.lastName, "User", "wire: customer.last_name")
+        XCTAssertEqual(dashboard.customer.email, "bankuser.one@example.com", "wire: customer.email")
+        XCTAssertEqual(dashboard.customer.phoneNumber, "+1-555-0100", "wire: customer.phone_number")
+
+        // ── accounts[0] (AccountDto) ──────────────────────────────
+        // wire: id, name, masked_number, balance, available_balance, type, currency_code
+        let acct = try XCTUnwrap(dashboard.accounts.first, "wire: accounts (array root)")
+        XCTAssertEqual(acct.id, "acct_chk_001", "wire: accounts[].id")
+        XCTAssertEqual(acct.name, "Everyday Checking", "wire: accounts[].name")
+        XCTAssertEqual(acct.maskedNumber, "••1234", "wire: accounts[].masked_number")
+        XCTAssertEqual(acct.balance, Decimal(string: "4287.53"), "wire: accounts[].balance")
+        XCTAssertEqual(acct.availableBalance, Decimal(string: "4187.53"),
+                       "wire: accounts[].available_balance")
+        XCTAssertEqual(acct.type, .checking, "wire: accounts[].type")
+        XCTAssertEqual(acct.currencyCode, "USD", "wire: accounts[].currency_code")
+
+        // ── recent_transactions[0] (TransactionDto) ───────────────
+        // wire: id, account_id, description, amount, posted_date, category, merchant_name
+        // Also exercises the `recent_transactions` top-level key.
+        let txn = try XCTUnwrap(dashboard.recentTransactions.first,
+                                "wire: recent_transactions (array root)")
+        XCTAssertEqual(txn.id, "txn_001", "wire: recent_transactions[].id")
+        XCTAssertEqual(txn.accountId, "acct_chk_001",
+                       "wire: recent_transactions[].account_id")
+        XCTAssertEqual(txn.description, "BLUE BOTTLE COFFEE",
+                       "wire: recent_transactions[].description")
+        XCTAssertEqual(txn.amount, Decimal(string: "-6.25"),
+                       "wire: recent_transactions[].amount")
+        XCTAssertEqual(txn.category, "DINING",
+                       "wire: recent_transactions[].category")
+        XCTAssertEqual(txn.merchantName, "Blue Bottle Coffee",
+                       "wire: recent_transactions[].merchant_name")
+        XCTAssertEqual(txn.postedDate,
+                       ISO8601DateFormatter().date(from: "2025-03-14T15:42:00Z"),
+                       "wire: recent_transactions[].posted_date")
     }
 
     // MARK: - Full-fixture happy path (bankuser.one)

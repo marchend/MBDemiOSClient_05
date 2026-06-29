@@ -28,6 +28,34 @@ import Foundation
 /// generated contract — that's what `convertFromSnakeCase` on the
 /// `JSONDecoder` consumes. If the contract evolves, these types must
 /// evolve in lock-step (and a new generated tree will be regenerated).
+///
+/// ## How contract drift is caught (the drift gate, made explicit)
+///
+/// `Generated/acmebank-bff-home-v1/` is **NOT compiled into the app
+/// target** (see `project.yml` — only `AcmeBank/` is in the source
+/// root). The generated types therefore cannot fail a Swift build when
+/// the contract changes; they exist on disk only as the input
+/// `scripts/contract-gate.py` re-generates against to detect drift in
+/// the committed tree itself.
+///
+/// The actual app-side drift gate is **`HomeDashboardDecodingTests`** in
+/// `AcmeBankTests/Features/Home/`. Those tests:
+///
+///   * decode the full `bankuser.one` fixture and assert every field
+///     by name (`first_name`, `phone_number`, `masked_number`,
+///     `available_balance`, `currency_code`, `account_id`,
+///     `posted_date`, `merchant_name`, `recent_transactions`, …), and
+///   * assert that `Decimal` precision is preserved and unknown
+///     `AccountType` values fall through to `.unknown`.
+///
+/// If the BFF contract renames a wire field (e.g. `masked_number` →
+/// `account_number_masked`), `convertFromSnakeCase` will fail to find
+/// the property and the decoding test for that field flips red BEFORE
+/// the app ships. Any contract change MUST therefore land in lockstep
+/// with an update to both this file AND
+/// `HomeDashboardDecodingTests`. Reviewers: treat that test file as
+/// the conformance assertion for this model — it is the gate, not a
+/// secondary check.
 public struct HomeDashboard: Decodable, Equatable {
     public let customer: Customer
     public let accounts: [Account]

@@ -133,6 +133,29 @@ final class BFFHomeRepositoryTests: XCTestCase {
         }
     }
 
+    /// `URLError(.cancelled)` is what `URLSession.data(for:)` raises
+    /// when the surrounding `Task` is cancelled. It must NOT collapse
+    /// to `APIError.network` (which would show a "couldn't reach
+    /// server" banner / trigger a retry); it must propagate as
+    /// `CancellationError` so SwiftUI's `.task {}` modifier silently
+    /// drops it.
+    func test_fetchHome_taskCancellation_throwsCancellationError_notNetwork() async {
+        StubURLProtocol.handler = { _ in
+            throw URLError(.cancelled)
+        }
+
+        do {
+            _ = try await makeRepository().fetchHome()
+            XCTFail("expected CancellationError")
+        } catch is CancellationError {
+            // success
+        } catch let error as APIError {
+            XCTFail("cancellation must not surface as APIError, got \(error)")
+        } catch {
+            XCTFail("expected CancellationError, got \(error)")
+        }
+    }
+
     func test_fetchHome_missingAccessToken_throwsUnauthorized_withoutHittingNetwork() async {
         StubURLProtocol.handler = { _ in
             XCTFail("network must not be touched when no token is available")

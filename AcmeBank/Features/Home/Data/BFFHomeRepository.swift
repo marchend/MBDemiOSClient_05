@@ -44,10 +44,19 @@ public final class BFFHomeRepository: HomeRepositoryProtocol {
         let response: URLResponse
         do {
             (data, response) = try await session.data(for: request)
+        } catch let urlError as URLError where urlError.code == .cancelled {
+            // Swift structured concurrency surfaces `Task.cancel()` as
+            // `URLError(.cancelled)` from `URLSession.data(for:)`. That
+            // is NOT a network failure — the caller asked us to stop
+            // (e.g. the user navigated away mid-fetch). Re-throw as a
+            // `CancellationError` so the ViewModel's `.task {}` modifier
+            // swallows it silently and we do NOT show a spurious
+            // "couldn't reach server" banner or trigger a retry.
+            throw CancellationError()
         } catch {
-            // URLSession surfaces transport failures (offline, DNS, TLS,
-            // timeout, cancellation) as `URLError`. Collapse them all to
-            // `.network` so the UI shows a single "couldn't reach" state.
+            // Everything else `URLSession` surfaces as `URLError`
+            // (offline, DNS, TLS, timeout) collapses to `.network`
+            // so the UI shows a single "couldn't reach" state.
             throw APIError.network
         }
 
