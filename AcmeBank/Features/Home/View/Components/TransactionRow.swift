@@ -12,6 +12,17 @@ import SwiftUI
 ///     negatives use U+2212 and POSITIVES use the SAME monochrome
 ///     text colour as negatives — sign is communicated by the glyph,
 ///     never by colour.
+///
+/// ## `transaction.description` naming-overlap trap
+///
+/// The `Transaction.description` field this row reads is a domain
+/// property whose name happens to collide with the requirement of
+/// Swift's `CustomStringConvertible`. The trap (and why a future
+/// `extension Transaction: CustomStringConvertible {}` would silently
+/// break this view) is documented in full on `Transaction` itself in
+/// `AcmeBank/Features/Home/Model/HomeDashboard.swift`. If you find
+/// yourself adding a `CustomStringConvertible` conformance, read that
+/// note first.
 public struct TransactionRow: View {
 
     public let transaction: Transaction

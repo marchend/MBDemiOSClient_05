@@ -116,6 +116,24 @@ public struct Account: Decodable, Equatable {
 public struct Transaction: Decodable, Equatable {
     public let id: String
     public let accountId: String
+    /// Free-text description of the transaction (the BFF wire field is
+    /// `"description"`, mapped here verbatim).
+    ///
+    /// ⚠️ **Naming-overlap trap — read before adding a protocol
+    /// conformance.** The identifier `description` is also the single
+    /// requirement of Swift's `CustomStringConvertible` protocol. If
+    /// anyone later writes `extension Transaction: CustomStringConvertible {}`
+    /// (or the compiler synthesises one), the protocol's `description`
+    /// accessor will silently shadow this stored property at every
+    /// call site that goes through the protocol witness table — code
+    /// that today reads `txn.description` to get the domain field
+    /// would start returning whatever string the conformance
+    /// produces. The wire-field name is fixed by the BFF contract
+    /// (`Generated/acmebank-bff-home-v1/`), so renaming this property
+    /// is not on the table; the alternative is to NOT add
+    /// `CustomStringConvertible` to `Transaction`. If a printable
+    /// representation is genuinely needed, expose it as a separate
+    /// computed property (e.g. `debugSummary`) instead of conforming.
     public let description: String
     public let amount: Decimal
     public let postedDate: Date

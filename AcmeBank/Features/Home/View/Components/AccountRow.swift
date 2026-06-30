@@ -15,6 +15,20 @@ import SwiftUI
 ///
 /// All colour is in the monochrome palette; sign is communicated by
 /// the glyph, never by tint.
+///
+/// ## Note on the missing `HomeView` container
+///
+/// This PR ships the row components, the `HomeViewModel` state
+/// machine, the data layer, and the design tokens — but NOT the
+/// `HomeView` container that assembles them and is wired into
+/// `AppCoordinator` after `didSignIn`. That split is **intentional**:
+/// the container screen is the next task under feature
+/// MBE2EDEM05-10 (the same feature this task, MBE2EDEM05-35,
+/// belongs to). See `CLAUDE.md` → "Deferred Work" for the explicit
+/// scope boundary. Until the follow-up task lands, the post-login
+/// destination remains `LandingView` and these components are
+/// reachable only from `#Preview` blocks — that is expected, not an
+/// omission.
 public struct AccountRow: View {
 
     public let account: Account
