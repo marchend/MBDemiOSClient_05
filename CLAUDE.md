@@ -107,7 +107,9 @@ AcmeBank/
                       AuthServicing, OktaAuthService), Networking, Notifications
   Domain/           ← Models + Repository protocols                [deferred]
   Data/             ← Remote + Mock repository implementations     [deferred]
-  Features/         ← Login, Landing, Home (Model + Data wired); Accounts, Transfer, Cards [deferred]
+  Features/         ← Login, Landing, Home (Model + Data + ViewModel + row components wired;
+                      HomeView container deferred to MBE2EDEM05-10 follow-up task);
+                      Accounts, Transfer, Cards [deferred]
   DesignSystem/     ← Colors, Typography, Assets.xcassets          [deferred]
   Resources/        ← Asset catalog, entitlements, privacy manifest
   Info.plist        ← Hand-rolled; OKTA_* + API_BASE_URL keys reference $(…) build settings
@@ -262,7 +264,18 @@ AppCoordinator                  ← top-level route (.login / .landing) [done]
 - LoginCoordinator / TabBarCoordinator decomposition under AppCoordinator
 - Networking shared layer (APIClient, APIRouter, RequestInterceptor) — `APIError` already shipped with Home
 - `SessionStore` extraction (today the coordinator carries the signOut hook)
-- `HomeView` + `HomeViewModel` (the data layer is wired; the screen is next)
+- **`HomeView` container** — the assembly screen that composes
+  `BrandBar` / `SignedInCard` / `AccountRow` / `TransactionRow` /
+  `LogOutButton`, owns the `@StateObject HomeViewModel`, wires the
+  `.task { await vm.load() }` first-appearance fetch, and is presented
+  by `AppCoordinator` after `didSignIn`. Intentionally split into the
+  Home-feature follow-up task under MBE2EDEM05-10: the row
+  components, design tokens (`AcmeColors`), `CurrencyFormatter`,
+  `HomeViewModel`, `HomeViewState`, and the BFF repository are all in
+  place; the container screen is the next ticket. Until it lands the
+  post-login destination remains `LandingView` (see "Post-login
+  routing" above), so the components are reachable only from
+  `#Preview` blocks — not from a real build flow.
 - Other feature screens (Accounts, Transfer, Cards, More)
 - Design system (Colors.swift, Typography.swift)
 - Internal Notifications (AppNotification, NotificationPublisher, NotificationKey)
