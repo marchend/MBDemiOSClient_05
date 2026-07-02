@@ -174,7 +174,12 @@ private struct LoginRouteView: View {
     ///
     /// If Okta is not configured at build time we pre-populate
     /// `errorMessage` with the not-configured copy so the user sees
-    /// what's wrong without having to tap Sign In to discover it.
+    /// what's wrong without having to tap Sign In to discover it —
+    /// unless the current `authService` opts out of the banner via
+    /// `suppressesNotConfiguredBanner` (the UI-test stub, whose
+    /// `signIn` returns a canned session regardless of Okta config).
+    /// This replaces an earlier `authService is UITestStubAuthService`
+    /// type-check that coupled production logic to a test-stub type.
     ///
     /// The closure captures `viewModel` weakly to break the
     /// `viewModel → onSignIn → viewModel` retain cycle that would
@@ -189,15 +194,14 @@ private struct LoginRouteView: View {
         let viewModel = LoginViewModel()
 
         // AC: with no OKTA_* env vars, launch to Login with the
-        // "Okta is not configured" banner pre-set. The UI-test stub
-        // path uses a `UITestStubAuthService` — never a real
-        // OktaAuthService — so the banner-pre-seed check is skipped
-        // when the composition root has substituted the auth service.
-        // We detect that indirectly: the stub returns `false` from
-        // `hasPersistedSession()` and never surfaces `.notConfigured`
-        // config, so this arm is dormant under the stub launch flag.
+        // "Okta is not configured" banner pre-set. Any auth service
+        // that doesn't consult `OktaConfig` (e.g. the UI-test stub)
+        // opts out via `suppressesNotConfiguredBanner`; the default
+        // (defined on the `AuthServicing` protocol extension) is
+        // `false`, so production conformers surface the banner
+        // without needing to declare the property.
         if case let .notConfigured(reason) = config,
-           !(authService is UITestStubAuthService) {
+           !authService.suppressesNotConfiguredBanner {
             viewModel.errorMessage =
                 "Okta is not configured on this build \u{2014} see README. (\(reason))"
         }

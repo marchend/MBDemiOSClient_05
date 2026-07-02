@@ -13,10 +13,10 @@ import SwiftUI
 /// surfaces the "Okta is not configured on this build — see README."
 /// banner that `ContentView.makeLoginViewModel()` pre-seeds.
 ///
-/// ## UI-test stub seam (`UITEST_STUB_HOME=1`)
+/// ## UI-test stub seam (`UITEST_STUB_HOME=1`, Debug-only)
 ///
-/// When launched with the `UITEST_STUB_HOME=1` launch argument, the
-/// app substitutes:
+/// When launched with the `UITEST_STUB_HOME=1` launch argument AND the
+/// build is Debug, the app substitutes:
 ///
 ///   * `authService` → `UITestStubAuthService` — signIn accepts any
 ///     credentials and returns a fixture `UserSession` keyed by
@@ -26,10 +26,17 @@ import SwiftUI
 ///     keyed by session, so the two fixture users render *distinct*
 ///     account counts (the assertion the UI test relies on).
 ///
+/// The stub-selection block is wrapped in `#if DEBUG` so Release
+/// builds have **no reference** to `UITestStubAuthService` or
+/// `UITestHomeFixtures` — those types are themselves declared inside
+/// `#if DEBUG` in `UITestStubs.swift` and are stripped from the App
+/// Store binary. In Release the initializer unconditionally wires the
+/// production `OktaAuthService` + `BFFHomeRepository`, so the
+/// launch-argument flag has no effect on shipping builds.
+///
 /// This is the ONLY code path in the production target that references
 /// `StubHomeRepository` at runtime; every other reference sits inside
-/// `#Preview` blocks. The launch-argument gate ensures a shipping build
-/// launched without the flag can never fall into the stub branch.
+/// `#Preview` blocks.
 @main
 struct AcmeBankApp: App {
 
@@ -38,11 +45,12 @@ struct AcmeBankApp: App {
     /// Factory the composition root uses to build a `HomeRepositoryProtocol`
     /// for a freshly-signed-in `UserSession`. Production: constructs a
     /// `BFFHomeRepository` bound to the session's access token.
-    /// UI-test stub path: returns a `StubHomeRepository` keyed by
-    /// `session.userId` so distinct users see distinct data.
+    /// UI-test stub path (Debug only): returns a `StubHomeRepository`
+    /// keyed by `session.userId` so distinct users see distinct data.
     private let homeRepositoryFactory: (UserSession) -> HomeRepositoryProtocol
 
     init() {
+        #if DEBUG
         let stubMode = ProcessInfo.processInfo.arguments.contains("UITEST_STUB_HOME=1")
         if stubMode {
             let auth: AuthServicing = UITestStubAuthService()
@@ -50,12 +58,14 @@ struct AcmeBankApp: App {
             self.homeRepositoryFactory = { session in
                 StubHomeRepository(behaviour: .success(UITestHomeFixtures.dashboard(for: session)))
             }
-        } else {
-            let auth: AuthServicing = OktaAuthService()
-            _coordinator = StateObject(wrappedValue: AppCoordinator(authService: auth))
-            self.homeRepositoryFactory = { session in
-                BFFHomeRepository(accessTokenProvider: { session.accessToken })
-            }
+            return
+        }
+        #endif
+
+        let auth: AuthServicing = OktaAuthService()
+        _coordinator = StateObject(wrappedValue: AppCoordinator(authService: auth))
+        self.homeRepositoryFactory = { session in
+            BFFHomeRepository(accessTokenProvider: { session.accessToken })
         }
     }
 

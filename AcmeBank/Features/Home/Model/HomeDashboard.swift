@@ -29,6 +29,29 @@ import Foundation
 /// `JSONDecoder` consumes. If the contract evolves, these types must
 /// evolve in lock-step (and a new generated tree will be regenerated).
 ///
+/// ## Deliberate narrowing: non-optional arrays
+///
+/// The generated `HomeDashboard.swift` declares both `accounts` and
+/// `recentTransactions` as `[…Dto]?` (optional). The hand-rolled model
+/// below makes them non-optional. This is intentional:
+///
+///   * The BFF ALWAYS returns both arrays (empty `[]` for an
+///     account-less user, never `null` and never absent). The
+///     contract's optionality is a forward-compatibility hedge in the
+///     generated schema, not the observed wire shape.
+///   * UI code can iterate `dashboard.accounts` directly without
+///     `?? []` sprinkled at every use-site.
+///   * A missing or `null` key from the BFF is a contract regression
+///     that MUST surface as the error banner + Retry, not as a silent
+///     "you have zero accounts" render (which looks identical to a
+///     legitimate empty-user response and would mask the drift).
+///
+/// The `HomeDashboardDecodingTests.test_decode_absentAccountsKey_*` /
+/// `test_decode_nullRecentTransactions_*` tests pin this hard-fail
+/// behaviour as intentional; a future change that makes these arrays
+/// optional-with-default-`[]` will flip those tests red and force the
+/// drift conversation before shipping.
+///
 /// ## How contract drift is caught (the drift gate, made explicit)
 ///
 /// `Generated/acmebank-bff-home-v1/` is **NOT compiled into the app
@@ -44,9 +67,11 @@ import Foundation
 ///   * decode the full `bankuser.one` fixture and assert every field
 ///     by name (`first_name`, `phone_number`, `masked_number`,
 ///     `available_balance`, `currency_code`, `account_id`,
-///     `posted_date`, `merchant_name`, `recent_transactions`, …), and
+///     `posted_date`, `merchant_name`, `recent_transactions`, …),
 ///   * assert that `Decimal` precision is preserved and unknown
-///     `AccountType` values fall through to `.unknown`.
+///     `AccountType` values fall through to `.unknown`, and
+///   * assert absent-or-null `accounts` / `recent_transactions` hard-
+///     fail decoding by design (see "Deliberate narrowing" above).
 ///
 /// If the BFF contract renames a wire field (e.g. `masked_number` →
 /// `account_number_masked`), `convertFromSnakeCase` will fail to find
