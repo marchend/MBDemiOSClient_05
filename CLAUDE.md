@@ -102,19 +102,20 @@ string. `setup.sh` does this automatically; the committed
 ## Key Directory Structure
 ```
 AcmeBank/
-  App/              ← @main entry (AcmeBankApp), AppCoordinator, ContentView, AppConfig
+  App/              ← @main entry (AcmeBankApp), AppCoordinator, ContentView,
+                      SessionStore, AppConfig, UITestStubs (launch-arg-gated)
   Core/             ← Auth (OktaConfig, AuthError, UserSession, KeychainStore,
                       AuthServicing, OktaAuthService), Networking, Notifications
   Domain/           ← Models + Repository protocols                [deferred]
   Data/             ← Remote + Mock repository implementations     [deferred]
-  Features/         ← Login, Landing, Home (Model + Data + ViewModel + row components wired;
-                      HomeView container deferred to MBE2EDEM05-10 follow-up task);
+  Features/         ← Login, Landing, Home (Model + Data + ViewModel + row
+                      components + HomeView container wired);
                       Accounts, Transfer, Cards [deferred]
   DesignSystem/     ← Colors, Typography, Assets.xcassets          [deferred]
   Resources/        ← Asset catalog, entitlements, privacy manifest
   Info.plist        ← Hand-rolled; OKTA_* + API_BASE_URL keys reference $(…) build settings
 AcmeBankTests/      ← XCTest unit tests
-AcmeBankUITests/    ← XCUITest end-to-end tests (Login, Landing happy path)
+AcmeBankUITests/    ← XCUITest end-to-end tests (Login, Landing, Home Log-out)
 Config/             ← xcconfig files
   Secrets.example.xcconfig   ← committed; placeholder values + #include? of local
   Secrets.local.xcconfig     ← gitignored; written by setup.sh from OKTA_* + API_BASE_URL env vars
@@ -128,7 +129,13 @@ setup.sh            ← Post-clone materialisation script
 ### Composition root (wired)
 - `AcmeBankApp` (`@main`) owns a single `@StateObject AppCoordinator`
   constructed with `OktaAuthService()`, injected into the view tree via
-  `.environmentObject`.
+  `.environmentObject`. When launched with `UITEST_STUB_HOME=1` in
+  `ProcessInfo.arguments`, `AcmeBankApp` substitutes
+  `UITestStubAuthService` + a `StubHomeRepository`-backed factory so
+  `HomeLogOutUITests` can drive the sign-in / sign-out flow without a
+  real Okta or BFF dependency. That launch-arg gate is the ONLY
+  runtime path in the production target that references
+  `StubHomeRepository`.
 - `AppCoordinator` (`@MainActor`, `ObservableObject`) publishes a single
   `route: AppRoute` of `.login` or `.landing(UserSession)`. Initial
   route at cold launch:
@@ -137,14 +144,20 @@ setup.sh            ← Post-clone materialisation script
       → `.landing(session)`
     - Refresh token present but no cached `UserSession` (silent re-auth
       not yet implemented) → `.login`
+  The coordinator also owns a single `SessionStore`, wired at init
+  time with `[weak self]` hooks that call `authService.signOut()`
+  (best-effort, errors swallowed) and `self.didSignOut()`.
 - `ContentView` switches on `coordinator.route`. For `.login` it builds
   a `LoginViewModel` whose `onSignIn` closure calls
-  `OktaAuthService.signIn(...)` and, on success, calls
+  `authService.signIn(...)` and, on success, calls
   `coordinator.didSignIn(session)`; on `AuthError` it surfaces
-  `error.userMessage`.
-- `LandingView` takes a `UserSession` and renders "Welcome,
-  \(displayName)" + the email. Both labels carry stable accessibility
-  identifiers `landing.welcome` / `landing.email` for XCUITest.
+  `error.userMessage`. For `.landing(session)` it builds a
+  `HomeRouteView` that owns a `@StateObject HomeViewModel` and renders
+  `HomeView`; the ViewModel's `onSessionExpired` closure AND
+  `HomeView`'s pinned `LogOutButton` both funnel through the same
+  `coordinator.sessionStore.signOut()`.
+- `LandingView` remains in the tree for legacy `LandingUITests` but
+  is no longer the post-login destination — `HomeView` is.
 
 ### MVVM + Coordinator (in progress)
 - **View** — SwiftUI `View` struct; renders `@Published` state; zero business logic.
@@ -165,17 +178,22 @@ AppCoordinator                  ← top-level route (.login / .landing) [done]
 
 ### Post-login routing + Log out / 401 contract (Home story)
 - **Post-login destination is `HomeView`.** When `coordinator.didSignIn`
-  fires, the route flips to `.home(session)` (today `.landing(session)`
-  until the Home feature lands). The Landing screen is a stepping-stone
-  retained for the e2e happy-path; the production destination is Home.
+  fires, the route flips to `.landing(session)` and `ContentView`
+  presents `HomeView` (via the `HomeRouteView` host that owns the
+  `@StateObject HomeViewModel`).
 - **`SessionStore.signOut()` is the ONE routing target shared by the
   Log out button and every 401-on-an-authenticated-request path.** Both
   call sites converge on this single function so the app can never end
   up in a "logged out in memory but the UI still shows the old session"
   state. `BFFHomeRepository` (and every future repository) maps HTTP 401
   to `APIError.unauthorized`; the consuming ViewModel forwards that to
-  `SessionStore.signOut()`, which clears the Keychain + cached
-  `UserSession` and flips the coordinator route back to `.login`.
+  `SessionStore.signOut()`, which invokes the coordinator-injected
+  `credentialClear` hook (calls `authService.signOut()` best-effort,
+  errors swallowed) and then the `onSignedOut` hook (flips the
+  coordinator route back to `.login`). Idempotence is safe by
+  construction: `KeychainStore.delete` treats not-found as success and
+  `didSignOut()` from `.login` is a no-op, so a UI double-tap or a
+  401 racing a Log out tap cannot corrupt state.
 
 ### Authentication — Okta OIDC
 - `OktaConfig` loads `OKTA_ISSUER`, `OKTA_CLIENT_ID`, `OKTA_REDIRECT_URI`,
@@ -226,7 +244,9 @@ AppCoordinator                  ← top-level route (.login / .landing) [done]
   the token, never in the URL** — the path is the bare `/v1/home` with
   no `customerId`/`cif` query.
 - `StubHomeRepository` (fixture-backed, "bankuser.one") is provided for
-  previews + tests ONLY; never wire it from a release code path.
+  previews + tests ONLY; never wire it from a release code path. The
+  `UITEST_STUB_HOME=1` launch-arg seam in `AcmeBankApp` is the sole
+  test-only exception.
 - Decoder strategies for every future repository: `JSONDecoder` with
   `keyDecodingStrategy = .convertFromSnakeCase` and
   `dateDecodingStrategy = .iso8601`. Money is `Decimal`, not `Double`.
@@ -255,7 +275,21 @@ AppCoordinator                  ← top-level route (.login / .landing) [done]
 ### Testing Conventions
 - Unit (XCTest): ViewModels, repositories, extensions. Inject mock repos via constructor.
 - UI (XCUITest): critical flows only (login, transfer, sign-out). Mock network at boundary
-  via `-UITestMode YES` launch argument. Use `accessibilityIdentifier` for stable locators.
+  via `-UITestMode YES` launch argument (or `UITEST_STUB_HOME=1` for the
+  Home Log-out flow). Use `accessibilityIdentifier` for stable locators.
+- **SwiftUI accessibility-identifier trap.** A container-level
+  `.accessibilityIdentifier` applied AFTER `.safeAreaInset` /
+  `.overlay` / `.toolbar` (or as the outermost modifier of a screen
+  body) propagates onto the inset/overlay's top-level accessibility
+  element, clobbering identifiers set inside. Result: the child
+  element renders and is tappable but XCUITest's
+  `app.buttons["child.id"]` never matches. Put screen-root identifiers
+  on an inner container BEFORE the inset content, or omit them
+  entirely if nothing queries them; keep identifiers on the
+  interactive elements themselves. This bit `HomeView`'s pinned
+  `LogOutButton` in a prior run — the `.safeAreaInset` block below
+  the root `content` must NOT be preceded / followed by a
+  container-level identifier at the outermost level.
 - Target ≥ 80% line coverage on `Core/` and `Features/`.
 
 ## Deferred Work (not in this PR)
@@ -263,19 +297,6 @@ AppCoordinator                  ← top-level route (.login / .landing) [done]
   cached-session branch falls back to `.login` until this lands)
 - LoginCoordinator / TabBarCoordinator decomposition under AppCoordinator
 - Networking shared layer (APIClient, APIRouter, RequestInterceptor) — `APIError` already shipped with Home
-- `SessionStore` extraction (today the coordinator carries the signOut hook)
-- **`HomeView` container** — the assembly screen that composes
-  `BrandBar` / `SignedInCard` / `AccountRow` / `TransactionRow` /
-  `LogOutButton`, owns the `@StateObject HomeViewModel`, wires the
-  `.task { await vm.load() }` first-appearance fetch, and is presented
-  by `AppCoordinator` after `didSignIn`. Intentionally split into the
-  Home-feature follow-up task under MBE2EDEM05-10: the row
-  components, design tokens (`AcmeColors`), `CurrencyFormatter`,
-  `HomeViewModel`, `HomeViewState`, and the BFF repository are all in
-  place; the container screen is the next ticket. Until it lands the
-  post-login destination remains `LandingView` (see "Post-login
-  routing" above), so the components are reachable only from
-  `#Preview` blocks — not from a real build flow.
 - Other feature screens (Accounts, Transfer, Cards, More)
 - Design system (Colors.swift, Typography.swift)
 - Internal Notifications (AppNotification, NotificationPublisher, NotificationKey)
