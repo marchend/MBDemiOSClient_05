@@ -1,11 +1,11 @@
 import XCTest
 
-/// End-to-end UI test of the Login → Landing happy path.
+/// End-to-end UI test of the Login → Home happy path.
 ///
 /// This test is GUARDED by an `XCTSkipUnless` on the presence of real
 /// Okta credentials in the test process environment. Without them, the
 /// app launches into the "Okta is not configured" Login state and there
-/// is no way to reach the Landing screen — the test would be vacuously
+/// is no way to reach the Home screen — the test would be vacuously
 /// red. CI without secrets sees this as a green skip.
 ///
 /// The env-var contract:
@@ -15,10 +15,16 @@ import XCTest
 ///     gate used by `LoginUITests.test_signIn_endToEnd_withRealOkta`.
 ///   - `OKTA_TEST_USERNAME` / `OKTA_TEST_PASSWORD` — credentials to
 ///     type into the Login screen.
-///   - `OKTA_TEST_DISPLAY_NAME` — the expected display name from the
-///     ID token's `name` claim, used to assert the Landing welcome line.
-///     Optional: if absent, we only assert the welcome label is present
-///     and non-empty.
+///
+/// Historically this file drove the Landing screen — the throwaway
+/// "Welcome, <displayName>" screen shipped before the Home feature.
+/// PR 4 of MBE2EDEM05-10 promoted `HomeView` to be the post-login
+/// destination, so the asserts here now target Home identifiers
+/// (`home.logOut` — pinned on every Home render). The
+/// `HomeLogOutUITests` suite covers the fuller sign-in / Log-out /
+/// re-sign-in flow with the launch-arg stub seam; this test remains
+/// as the ONE test that goes end-to-end against a live Okta tenant
+/// and BFF when both are configured.
 ///
 /// This file intentionally does NOT `import AcmeBank`. See the
 /// `LoginUITests` header comment for why: UI-test bundles
@@ -53,13 +59,16 @@ final class LandingUITests: XCTestCase {
     ///   1. Launch the app with real Okta config injected at build time.
     ///   2. Type the configured credentials.
     ///   3. Tap Sign In.
-    ///   4. Assert the Landing welcome line appears, and (if the
-    ///      expected display name was provided) that it contains that
-    ///      name.
+    ///   4. Assert the pinned Home `Log out` button appears (which
+    ///      only exists on `HomeView`) — the presence of that button
+    ///      proves the app both authenticated AND fetched the Home
+    ///      dashboard from the BFF (a failed fetch would show the
+    ///      error banner + Retry, but the pinned Log out button is
+    ///      rendered in every state of Home).
     ///
     /// Skipped unless `OKTA_E2E_CONFIGURED=YES` AND both credentials
     /// are set, so CI without secrets is green.
-    func test_signIn_navigatesToLanding_withRealOkta() throws {
+    func test_signIn_navigatesToHome_withRealOkta() throws {
         let env = ProcessInfo.processInfo.environment
         let configured = env["OKTA_E2E_CONFIGURED"] == "YES"
         let username = env["OKTA_TEST_USERNAME"]
@@ -94,33 +103,11 @@ final class LandingUITests: XCTestCase {
                       "Sign In button should be enabled once both fields are filled")
         signInButton.tap()
 
-        // 3. Wait for the Landing welcome label. Generous timeout: real
-        //    Okta round-trip + Keychain write can take several seconds
-        //    on a cold simulator.
-        let welcomeLabel = app.staticTexts["landing.welcome"]
-        XCTAssertTrue(welcomeLabel.waitForExistence(timeout: 15),
-                      "Landing welcome label should appear after a successful sign-in")
-
-        // 4. If the expected display name was supplied, assert the
-        //    label contains it. The welcome string is "Welcome, <name>"
-        //    so a `contains` check is robust to small copy changes.
-        if let expectedName = env["OKTA_TEST_DISPLAY_NAME"], !expectedName.isEmpty {
-            let labelValue = welcomeLabel.label
-            XCTAssertTrue(
-                labelValue.contains(expectedName),
-                "Landing welcome label \"\(labelValue)\" should contain the configured display name \"\(expectedName)\""
-            )
-        } else {
-            // No expected name supplied: assert the label is non-empty
-            // (i.e. the ID token actually carried a `name` claim that
-            // the view rendered into the Welcome string).
-            XCTAssertFalse(welcomeLabel.label.isEmpty,
-                           "Landing welcome label must render the user's display name from the ID token")
-        }
-
-        // 5. Bonus: the email line should also be present.
-        let emailLabel = app.staticTexts["landing.email"]
-        XCTAssertTrue(emailLabel.exists,
-                      "Landing email label should appear after sign-in")
+        // 3. Wait for the pinned Home Log out button. Generous timeout:
+        //    real Okta round-trip + BFF fetch + Keychain write can take
+        //    several seconds on a cold simulator.
+        let logOutButton = app.buttons["home.logOut"]
+        XCTAssertTrue(logOutButton.waitForExistence(timeout: 20),
+                      "The pinned Home 'Log out' button should appear after a successful sign-in")
     }
 }

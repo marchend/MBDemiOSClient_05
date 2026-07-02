@@ -45,7 +45,7 @@ final class HomeDashboardDecodingTests: XCTestCase {
     func test_contractCoverage_everyWireFieldFromV1HomeIsRead() throws {
         let dashboard = try makeDecoder().decode(HomeDashboard.self, from: Self.bankuserOneJSON)
 
-        // ── customer (CustomerDto) ────────────────────────────────
+        // ── customer (CustomerDto) ────────────────────────────────────
         // wire: id, first_name, last_name, email, phone_number
         XCTAssertEqual(dashboard.customer.id, "cust_bankuser_one", "wire: customer.id")
         XCTAssertEqual(dashboard.customer.firstName, "Bank", "wire: customer.first_name")
@@ -53,7 +53,7 @@ final class HomeDashboardDecodingTests: XCTestCase {
         XCTAssertEqual(dashboard.customer.email, "bankuser.one@example.com", "wire: customer.email")
         XCTAssertEqual(dashboard.customer.phoneNumber, "+1-555-0100", "wire: customer.phone_number")
 
-        // ── accounts[0] (AccountDto) ──────────────────────────────
+        // ── accounts[0] (AccountDto) ──────────────────────────────────
         // wire: id, name, masked_number, balance, available_balance, type, currency_code
         let acct = try XCTUnwrap(dashboard.accounts.first, "wire: accounts (array root)")
         XCTAssertEqual(acct.id, "acct_chk_001", "wire: accounts[].id")
@@ -237,6 +237,98 @@ final class HomeDashboardDecodingTests: XCTestCase {
         let dashboard = try makeDecoder().decode(HomeDashboard.self, from: json)
         XCTAssertEqual(dashboard.accounts.first?.balance, Decimal(string: "0.10"))
         XCTAssertEqual(dashboard.accounts.first?.availableBalance, Decimal(string: "0.20"))
+    }
+
+    // MARK: - Drift-gate: array-optionality mismatch with generated contract
+    //
+    // `Generated/acmebank-bff-home-v1/HomeDashboard.swift` declares both
+    // `accounts` and `recentTransactions` as `[…Dto]?` (optional on the
+    // wire). The hand-rolled `HomeDashboard` in `AcmeBank/Features/Home/Model/`
+    // makes them non-optional `[Account]` / `[Transaction]`. That is a
+    // DELIBERATE narrowing of the contract for the app-side model:
+    //
+    //   * The BFF's `GET /v1/home` currently ALWAYS returns both arrays
+    //     (empty `[]` for an account-less user, never `null` and never
+    //     absent). The contract's optionality is a forward-compatibility
+    //     hedge in the generated schema, not the observed wire shape.
+    //   * Making the Swift model non-optional means UI code can iterate
+    //     `dashboard.accounts` without `?? []` sprinkled everywhere, and
+    //     an unexpected `null` / missing key from the BFF is caught here
+    //     as a hard decoding failure rather than silently rendering an
+    //     empty list (which would look identical to "you have zero
+    //     accounts" and mask a contract regression).
+    //
+    // If either key is ever absent or `null` on the wire, the decoder
+    // MUST throw `DecodingError.keyNotFound` / `.valueNotFound`. The
+    // repository maps that to `APIError.decoding(...)` and the UI shows
+    // the error banner + Retry — which is the correct signal for
+    // "contract broke", not "the user has no accounts".
+    //
+    // The two tests below pin that behaviour so a future refactor of the
+    // model (e.g. someone deciding to make the arrays optional and
+    // default to `[]`) will flip this file red and force the drift
+    // conversation before shipping.
+
+    func test_decode_absentAccountsKey_isHardFailure_byDesign() throws {
+        // `accounts` key entirely absent from the payload. The Swift
+        // model treats this as a contract break, not "empty list".
+        let json = """
+        {
+          "customer": \(Self.minimalCustomerJSON),
+          "recent_transactions": []
+        }
+        """.data(using: .utf8)!
+
+        XCTAssertThrowsError(try makeDecoder().decode(HomeDashboard.self, from: json)) { error in
+            guard case DecodingError.keyNotFound(let key, _) = error else {
+                XCTFail("absent `accounts` must throw .keyNotFound; got \(error)")
+                return
+            }
+            XCTAssertEqual(key.stringValue, "accounts",
+                           "the missing key must be identified as `accounts`")
+        }
+    }
+
+    func test_decode_nullRecentTransactions_isHardFailure_byDesign() throws {
+        // `recent_transactions` explicitly null. Same drift signal:
+        // never coerce to `[]`, throw so the UI shows the error banner.
+        let json = """
+        {
+          "customer": \(Self.minimalCustomerJSON),
+          "accounts": [],
+          "recent_transactions": null
+        }
+        """.data(using: .utf8)!
+
+        XCTAssertThrowsError(try makeDecoder().decode(HomeDashboard.self, from: json)) { error in
+            switch error {
+            case DecodingError.valueNotFound, DecodingError.typeMismatch:
+                // Either is an acceptable "contract broke" signal — the
+                // point is we do NOT silently coerce null → [].
+                break
+            default:
+                XCTFail("null `recent_transactions` must throw .valueNotFound or .typeMismatch; got \(error)")
+            }
+        }
+    }
+
+    func test_decode_emptyArrays_areAcceptedAsHappyPath() throws {
+        // An account-less / transaction-less user is a LEGITIMATE
+        // response — both arrays present as `[]`. This must decode
+        // cleanly to a `HomeDashboard` with empty collections; the
+        // hard-fail behaviour above is scoped strictly to
+        // absent-or-null, not empty.
+        let json = """
+        {
+          "customer": \(Self.minimalCustomerJSON),
+          "accounts": [],
+          "recent_transactions": []
+        }
+        """.data(using: .utf8)!
+
+        let dashboard = try makeDecoder().decode(HomeDashboard.self, from: json)
+        XCTAssertTrue(dashboard.accounts.isEmpty)
+        XCTAssertTrue(dashboard.recentTransactions.isEmpty)
     }
 
     // MARK: - Fixtures

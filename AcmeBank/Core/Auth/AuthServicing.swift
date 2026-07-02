@@ -39,4 +39,30 @@ public protocol AuthServicing {
     /// Wipe persisted tokens. Idempotent: deleting a non-existent item
     /// is treated as success.
     func signOut() throws
+
+    /// When `true`, `ContentView`'s Login route MUST NOT pre-seed the
+    /// "Okta is not configured" error banner even if `OktaConfig.load()`
+    /// returned `.notConfigured`.
+    ///
+    /// This exists so alternative auth conformers that don't consult
+    /// `OktaConfig` at all — e.g. the UI-test stub, which returns a
+    /// canned `UserSession` regardless of build-time config — can opt
+    /// out of the banner without `ContentView` type-checking the
+    /// concrete class. The default value is `false` (produced by the
+    /// protocol extension below), so `OktaAuthService` and every other
+    /// production/test conformer inherits the banner-shown behaviour
+    /// without needing to declare the property.
+    ///
+    /// See the review feedback on `ContentView.makeLoginViewModel`:
+    /// the previous version used `authService is UITestStubAuthService`,
+    /// which coupled production code to a test-stub type name. This
+    /// protocol requirement replaces that coupling with an intent-named
+    /// boolean each conformer can override.
+    var suppressesNotConfiguredBanner: Bool { get }
+}
+
+extension AuthServicing {
+    /// Default: production conformers show the banner. Only the
+    /// UI-test stub overrides this to `true`.
+    public var suppressesNotConfiguredBanner: Bool { false }
 }

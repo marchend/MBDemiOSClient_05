@@ -4,9 +4,11 @@ import SwiftUI
 ///
 /// `ContentView` is the composition root for the post-app-launch screen
 /// graph. It does ONE job: switch on `AppCoordinator.route` and present
-/// either `LoginView` or `LandingView`. Every dependency the destination
+/// either `LoginView` or `HomeView`. Every dependency the destination
 /// view needs (the `LoginViewModel` with a fully-wired `onSignIn`
-/// closure, the `UserSession` for landing) is constructed here.
+/// closure, the `UserSession` for the home screen, the `HomeViewModel`
+/// with 401-routing wired to `SessionStore.signOut()`) is constructed
+/// here.
 ///
 /// The `LoginViewModel` is built fresh each time the coordinator routes
 /// back to `.login` so a previous sign-in attempt's transient state
@@ -25,8 +27,21 @@ struct ContentView: View {
     /// inject a `.notConfigured(...)` value to exercise that path.
     let configProvider: () -> OktaConfig
 
-    init(configProvider: @escaping () -> OktaConfig = { OktaConfig.load() }) {
+    /// Factory the composition root uses to build the
+    /// `HomeRepositoryProtocol` for a signed-in session. Production
+    /// wires `BFFHomeRepository`; the UI-test stub seam wires
+    /// `StubHomeRepository` (see `AcmeBankApp` for the launch-arg
+    /// gate). Injected here so previews can inject their own.
+    let homeRepositoryFactory: (UserSession) -> HomeRepositoryProtocol
+
+    init(
+        configProvider: @escaping () -> OktaConfig = { OktaConfig.load() },
+        homeRepositoryFactory: @escaping (UserSession) -> HomeRepositoryProtocol = { session in
+            BFFHomeRepository(accessTokenProvider: { session.accessToken })
+        }
+    ) {
         self.configProvider = configProvider
+        self.homeRepositoryFactory = homeRepositoryFactory
     }
 
     var body: some View {
@@ -43,10 +58,66 @@ struct ContentView: View {
                 config: configProvider()
             )
         case .landing(let session):
-            LandingView(session: session)
+            HomeRouteView(
+                session: session,
+                sessionStore: coordinator.sessionStore,
+                homeRepositoryFactory: homeRepositoryFactory
+            )
         }
     }
 }
+
+// MARK: - Home route
+
+/// Per-`.landing`-presentation host that owns the `HomeViewModel`.
+///
+/// A dedicated view (vs constructing the VM inline in `ContentView.body`)
+/// keeps the `@StateObject` factory closure invoked exactly once per
+/// `.landing` presentation — not on every `ContentView` body
+/// re-evaluation — and cleanly ties the VM's lifetime to the route:
+/// signing out (route → `.login`) tears the view down; signing back in
+/// (route → `.landing`) builds a fresh VM with a fresh session.
+///
+/// Both the 401 path (`onSessionExpired` inside the VM) and the pinned
+/// Log out button (`onSignOut` on `HomeView`) funnel through the same
+/// `SessionStore.signOut()`, so there is exactly one routing target
+/// for "end the current session".
+private struct HomeRouteView: View {
+
+    @StateObject private var viewModel: HomeViewModel
+    private let sessionStore: SessionStore
+
+    init(
+        session: UserSession,
+        sessionStore: SessionStore,
+        homeRepositoryFactory: (UserSession) -> HomeRepositoryProtocol
+    ) {
+        self.sessionStore = sessionStore
+        let repo = homeRepositoryFactory(session)
+        // Autoclosure: SwiftUI invokes this exactly once per view identity.
+        _viewModel = StateObject(
+            wrappedValue: HomeViewModel(
+                session: session,
+                repository: repo,
+                onSessionExpired: { [sessionStore] in
+                    // 401 → same routing target as the Log out button.
+                    sessionStore.signOut()
+                }
+            )
+        )
+    }
+
+    var body: some View {
+        HomeView(
+            viewModel: viewModel,
+            onSignOut: { [sessionStore] in
+                sessionStore.signOut()
+            }
+        )
+    }
+}
+
+// MARK: - Login route
 
 /// Per-`.login`-presentation host that owns the `LoginViewModel`.
 ///
@@ -91,7 +162,7 @@ private struct LoginRouteView: View {
     ///      disables and the spinner appears, preventing rapid double-taps.
     ///   2. Awaits `authService.signIn(...)` on the MainActor.
     ///   3. On success, hands the resulting `UserSession` to the
-    ///      coordinator which switches the root view to `LandingView`.
+    ///      coordinator which switches the root view to the Home screen.
     ///   4. On `AuthError`, surfaces the AC7 user-facing copy via
     ///      `error.userMessage`. Any non-`AuthError` is logged and shown
     ///      with `.network`'s copy (belt-and-braces — `OktaAuthService`
@@ -103,7 +174,12 @@ private struct LoginRouteView: View {
     ///
     /// If Okta is not configured at build time we pre-populate
     /// `errorMessage` with the not-configured copy so the user sees
-    /// what's wrong without having to tap Sign In to discover it.
+    /// what's wrong without having to tap Sign In to discover it —
+    /// unless the current `authService` opts out of the banner via
+    /// `suppressesNotConfiguredBanner` (the UI-test stub, whose
+    /// `signIn` returns a canned session regardless of Okta config).
+    /// This replaces an earlier `authService is UITestStubAuthService`
+    /// type-check that coupled production logic to a test-stub type.
     ///
     /// The closure captures `viewModel` weakly to break the
     /// `viewModel → onSignIn → viewModel` retain cycle that would
@@ -118,10 +194,16 @@ private struct LoginRouteView: View {
         let viewModel = LoginViewModel()
 
         // AC: with no OKTA_* env vars, launch to Login with the
-        // "Okta is not configured" banner pre-set.
-        if case let .notConfigured(reason) = config {
+        // "Okta is not configured" banner pre-set. Any auth service
+        // that doesn't consult `OktaConfig` (e.g. the UI-test stub)
+        // opts out via `suppressesNotConfiguredBanner`; the default
+        // (defined on the `AuthServicing` protocol extension) is
+        // `false`, so production conformers surface the banner
+        // without needing to declare the property.
+        if case let .notConfigured(reason) = config,
+           !authService.suppressesNotConfiguredBanner {
             viewModel.errorMessage =
-                "Okta is not configured on this build — see README. (\(reason))"
+                "Okta is not configured on this build \u{2014} see README. (\(reason))"
         }
 
         viewModel.onSignIn = { [authService, coordinator, weak viewModel] username, password, keepSignedIn in
@@ -156,11 +238,11 @@ private struct LoginRouteView: View {
 }
 
 #Preview("Login route") {
-    ContentView()
+    ContentView(homeRepositoryFactory: { _ in StubHomeRepository() })
         .environmentObject(AppCoordinator(authService: PreviewAuthService()))
 }
 
-#Preview("Landing route") {
+#Preview("Home route") {
     let coordinator = AppCoordinator(authService: PreviewAuthService())
     coordinator.didSignIn(
         UserSession(
@@ -172,7 +254,8 @@ private struct LoginRouteView: View {
             deviceName: "Preview"
         )
     )
-    return ContentView().environmentObject(coordinator)
+    return ContentView(homeRepositoryFactory: { _ in StubHomeRepository() })
+        .environmentObject(coordinator)
 }
 
 /// Preview-only `AuthServicing` stub. Never reaches the real network.
