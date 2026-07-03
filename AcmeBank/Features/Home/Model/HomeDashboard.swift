@@ -162,7 +162,14 @@ public struct Transaction: Decodable, Equatable {
     public let description: String
     public let amount: Decimal
     public let postedDate: Date
-    public let category: String
+    /// May be `null`/absent (interest credits, payroll deposits, card
+    /// payments, dividends, …). Optional per the `acmebank-bff-home-v1`
+    /// contract — `TransactionDto` declares NO `required` properties, and
+    /// the live BFF sends explicit `"category": null` on several
+    /// transactions. A non-optional here made the whole Home payload fail
+    /// decoding ("unexpected response") the moment a real transaction
+    /// without a category arrived.
+    public let category: String?
     /// May be absent (cash withdrawals, transfers, fees, …).
     public let merchantName: String?
 
@@ -172,7 +179,7 @@ public struct Transaction: Decodable, Equatable {
         description: String,
         amount: Decimal,
         postedDate: Date,
-        category: String,
+        category: String?,
         merchantName: String?
     ) {
         self.id = id
@@ -185,19 +192,34 @@ public struct Transaction: Decodable, Equatable {
     }
 }
 
-/// Account product type. Wire format is UPPERCASE ASCII; any value the
-/// app doesn't recognise decodes to `.unknown` (never throws) so a
+/// Account product type. The contract leaves `AccountDto.type` an OPEN
+/// string, and the live BFF emits lowercase values — including the
+/// Canadian spelling `"chequing"` and `"investment"` (captured wire truth,
+/// 2026-07-03: `chequing` / `savings` / `investment` / `credit`). Decode
+/// case-insensitively and map known spellings; any value the app doesn't
+/// recognise decodes to `.unknown` (never throws) so a
 /// forward-incompatible payload still renders.
+///
+/// The previous UPPERCASE raw values (`"CHECKING"` …) matched no real
+/// payload — every live account silently rendered as `.unknown`.
 public enum AccountType: String, Decodable, Equatable {
-    case checking = "CHECKING"
-    case savings = "SAVINGS"
-    case credit = "CREDIT"
-    case loan = "LOAN"
+    case checking
+    case savings
+    case investment
+    case credit
+    case loan
     case unknown
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
-        let raw = try container.decode(String.self)
-        self = AccountType(rawValue: raw) ?? .unknown
+        let raw = try container.decode(String.self).lowercased()
+        switch raw {
+        case "checking", "chequing": self = .checking
+        case "savings": self = .savings
+        case "investment": self = .investment
+        case "credit": self = .credit
+        case "loan": self = .loan
+        default: self = .unknown
+        }
     }
 }

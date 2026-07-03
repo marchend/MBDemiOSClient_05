@@ -144,6 +144,36 @@ final class HomeDashboardDecodingTests: XCTestCase {
         XCTAssertEqual(first.postedDate, expected)
     }
 
+    // MARK: - Captured LIVE wire regression (2026-07-03)
+
+    /// Regression for the "unexpected response" Home failure: this fixture
+    /// is a trimmed CAPTURE of the real deployed BFF `/v1/home` body
+    /// (mbdemo-bff-develop, 2026-07-03) — NOT an invented shape. Two
+    /// realities the invented fixtures missed:
+    ///   1. `"category": null` on several transactions (interest credits,
+    ///      payroll, card payments) — a non-optional `category` made the
+    ///      ENTIRE payload throw and Home render the decode-error state.
+    ///   2. lowercase account types incl. Canadian `"chequing"` and
+    ///      `"investment"` — the old UPPERCASE raw values mapped every
+    ///      live account to `.unknown`.
+    /// Per the contract (`TransactionDto` has no `required` properties;
+    /// `AccountDto.type` is an open string) the DECODER must tolerate both.
+    func test_decode_capturedLiveWire_nullCategoryAndLowercaseTypes() throws {
+        let dashboard = try makeDecoder().decode(HomeDashboard.self, from: Self.capturedLiveWireJSON)
+
+        XCTAssertEqual(dashboard.customer.id, "cust-1002")
+        XCTAssertEqual(dashboard.accounts.count, 4)
+        XCTAssertEqual(dashboard.accounts[0].type, .checking,   "wire: chequing")
+        XCTAssertEqual(dashboard.accounts[1].type, .savings,    "wire: savings")
+        XCTAssertEqual(dashboard.accounts[2].type, .investment, "wire: investment")
+        XCTAssertEqual(dashboard.accounts[3].type, .credit,     "wire: credit")
+
+        XCTAssertEqual(dashboard.recentTransactions.count, 2)
+        XCTAssertNil(dashboard.recentTransactions[0].category,
+                     "wire: recent_transactions[].category is null")
+        XCTAssertEqual(dashboard.recentTransactions[1].category, "Dining")
+    }
+
     // MARK: - Edge cases
 
     func test_decode_tolerates_nullMerchantName() throws {
@@ -346,6 +376,38 @@ final class HomeDashboardDecodingTests: XCTestCase {
     /// The "bankuser.one" sample payload referenced by the story. Kept
     /// inline so the test file is self-contained — no bundled-resource
     /// machinery in the test target.
+    /// Trimmed capture of the REAL deployed BFF response (2026-07-03).
+    static let capturedLiveWireJSON: Data = """
+    {
+      "customer": {
+        "first_name": "Bankuser",
+        "last_name": "One",
+        "email": "bankuser.one@sisystems.com",
+        "phone_number": "+1-604-555-0188",
+        "segment": "RETAIL",
+        "id": "cust-1002"
+      },
+      "accounts": [
+        {"name": "Everyday Chequing", "masked_number": "3301", "balance": 1052.18,
+         "available_balance": 1052.18, "type": "chequing", "currency_code": "CAD", "id": "acct-4"},
+        {"name": "Tax-Free Savings", "masked_number": "7742", "balance": 5600.00,
+         "available_balance": 5600.00, "type": "savings", "currency_code": "CAD", "id": "acct-5"},
+        {"name": "TFSA Investment", "masked_number": "2290", "balance": 23410.55,
+         "available_balance": 23410.55, "type": "investment", "currency_code": "CAD", "id": "acct-6"},
+        {"name": "Mastercard Gold", "masked_number": "4411", "balance": -2340.00,
+         "available_balance": 7660.00, "type": "credit", "currency_code": "CAD", "id": "acct-7"}
+      ],
+      "recent_transactions": [
+        {"description": "Interest Credit", "amount": 8.75,
+         "posted_date": "2026-06-30T23:59:00Z", "category": null,
+         "merchant_name": null, "id": "txn-5001", "account_id": "acct-5"},
+        {"description": "Restaurant", "amount": -95.6,
+         "posted_date": "2026-06-09T19:30:00Z", "category": "Dining",
+         "merchant_name": "The Keg", "id": "txn-7001", "account_id": "acct-7"}
+      ]
+    }
+    """.data(using: .utf8)!
+
     static let bankuserOneJSON: Data = """
     {
       "customer": {
