@@ -86,6 +86,7 @@ public struct AccountRow: View {
         switch account.type {
         case .checking: return "banknote"
         case .savings: return "building.columns"
+        case .investment: return "chart.line.uptrend.xyaxis"
         case .credit: return "creditcard"
         case .loan: return "doc.text"
         case .unknown: return "questionmark.circle"
@@ -100,8 +101,9 @@ public struct AccountRow: View {
 
     private var typeLabel: String {
         switch account.type {
-        case .checking: return "Checking"
+        case .checking: return "Chequing"
         case .savings: return "Savings"
+        case .investment: return "Investment"
         case .credit: return "Credit"
         case .loan: return "Loan"
         case .unknown: return "Account"
